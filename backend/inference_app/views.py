@@ -15,20 +15,25 @@ class FileUploadView(APIView):
             file_instance = file_serializer.save()
             file_path = file_instance.file.path
             
-            # Get type overrides if provided
+            # Get parameters
             type_overrides = {}
             if 'type_overrides' in request.data:
                 type_overrides = json.loads(request.data['type_overrides'])
             
-            # Process file with type overrides
-            df, inferred_types, conversion_errors = process_file(file_path, type_overrides)
+            has_headers = request.data.get('has_headers', 'true').lower() == 'true'
+            
+            # Process file with parameters
+            df, inferred_types, conversion_errors = process_file(
+                file_path, 
+                type_overrides=type_overrides,
+                has_headers=has_headers
+            )
             
             response_data = {
                 'inferred_types': inferred_types,
                 'conversion_errors': conversion_errors
             }
             
-            # If there are conversion errors, return them with a 400 status
             if conversion_errors:
                 return Response(response_data, status=400)
             

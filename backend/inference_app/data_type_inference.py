@@ -4,22 +4,37 @@ import os
 from dateutil.parser import parse
 import re
 
-def load_data(file_path, chunksize=None):
+def load_data(file_path, has_headers=True, chunksize=None):
     """
     Load data from a CSV or Excel file into a Pandas DataFrame.
     
     Parameters:
     - file_path (str): The path to the CSV or Excel file.
+    - has_headers (bool): Whether the file has headers in the first row.
     - chunksize (int, optional): The number of rows per chunk (for large files).
     
     Returns:
     - df (DataFrame or TextFileReader): The loaded DataFrame or an iterator for chunked processing.
     """
     file_ext = os.path.splitext(file_path)[1].lower()
+    
     if file_ext == '.csv':
-        return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
+        if has_headers:
+            return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
+        else:
+            # Generate column names if no headers
+            df = pd.read_csv(file_path, header=None, chunksize=chunksize, low_memory=False)
+            if not chunksize:
+                df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+            return df
     elif file_ext in ['.xls', '.xlsx']:
-        return pd.read_excel(file_path, chunksize=chunksize)
+        if has_headers:
+            return pd.read_excel(file_path, chunksize=chunksize)
+        else:
+            df = pd.read_excel(file_path, header=None, chunksize=chunksize)
+            if not chunksize:
+                df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+            return df
     else:
         raise ValueError("Unsupported file format. Please provide a CSV or Excel file.")
 
@@ -148,40 +163,34 @@ def infer_and_convert_dtypes(df, type_overrides=None):
 
     return inferred_types, conversion_errors
 
-def process_file(file_path, type_overrides=None):
+def process_file(file_path, type_overrides=None, has_headers=True):
     """
     Process the file by loading it and inferring data types.
-    
-    Parameters:
-    - file_path (str): The path to the CSV or Excel file.
-    - type_overrides (dict, optional): A dictionary mapping column names to desired data types.
-    Returns:
-    - df (DataFrame): The DataFrame with converted data types.
-    - inferred_types (dict): The inferred data types for each column.
     """
-    # Determine file size to decide whether to use chunking
     file_size = os.path.getsize(file_path)
     use_chunking = file_size > 100 * 1024 * 1024  # 100 MB threshold
     
     if use_chunking:
-        # Process file in chunks
-        chunks = load_data(file_path, chunksize=100000)
+        chunks = load_data(file_path, has_headers=has_headers, chunksize=100000)
         inferred_types = {}
         conversion_errors = {}
         df_list = []
         
+        # For the first chunk, generate column names if no headers
+        first_chunk = True
         for chunk in chunks:
+            if first_chunk and not has_headers:
+                chunk.columns = [f'Column_{i+1}' for i in range(len(chunk.columns))]
+                first_chunk = False
+                
             chunk_inferred_types, chunk_errors = infer_and_convert_dtypes(chunk, type_overrides)
             df_list.append(chunk)
-            # Merge inferred types and errors
             inferred_types.update(chunk_inferred_types)
             conversion_errors.update(chunk_errors)
             
-        # Concatenate all chunks into a single DataFrame
         df = pd.concat(df_list, ignore_index=True)
     else:
-        # Load entire file into DataFrame
-        df = load_data(file_path)
+        df = load_data(file_path, has_headers=has_headers)
         inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
     
     return df, inferred_types, conversion_errors

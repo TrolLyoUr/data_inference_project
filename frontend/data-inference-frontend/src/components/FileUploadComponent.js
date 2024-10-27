@@ -6,6 +6,7 @@ function FileUploadComponent() {
   const [inferredTypes, setInferredTypes] = useState(null);
   const [modifiedTypes, setModifiedTypes] = useState({});
   const [conversionErrors, setConversionErrors] = useState({});
+  const [hasHeaders, setHasHeaders] = useState(true);
 
   const handleFileChange = (e) => {
     setFile(e.target.files[0]);
@@ -25,6 +26,7 @@ function FileUploadComponent() {
 
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("has_headers", hasHeaders);
 
     axios
       .post("/api/upload/", formData)
@@ -63,11 +65,23 @@ function FileUploadComponent() {
   return (
     <div>
       <form onSubmit={handleSubmit}>
-        <input
-          type="file"
-          accept=".csv, .xls, .xlsx"
-          onChange={handleFileChange}
-        />
+        <div>
+          <input
+            type="file"
+            accept=".csv, .xls, .xlsx"
+            onChange={handleFileChange}
+          />
+          <div>
+            <label>
+              <input
+                type="checkbox"
+                checked={hasHeaders}
+                onChange={(e) => setHasHeaders(e.target.checked)}
+              />
+              File has headers
+            </label>
+          </div>
+        </div>
         <button type="submit">Upload and Process</button>
       </form>
 
@@ -88,7 +102,6 @@ function FileUploadComponent() {
                   <option value="bool">Boolean</option>
                   <option value="category">Categorical</option>
                   <option value="string">Text</option>
-                  <option value="object">Text</option>
                   <option value="empty">Empty</option>
                 </select>
                 {conversionErrors[column] && (
