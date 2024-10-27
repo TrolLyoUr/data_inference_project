@@ -161,7 +161,6 @@ def infer_and_convert_dtypes(df, type_overrides=None):
             except ValueError:
                 # If conversion to Int64 fails, convert to float
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-            print(df[col].dtype)
             inferred_types[col] = str(df[col].dtype)
             continue
 
