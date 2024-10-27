@@ -29,29 +29,39 @@ def infer_and_convert_dtypes(df, type_overrides=None):
     
     Parameters:
     - df (DataFrame): The DataFrame to process.
-    
+    - type_overrides (dict, optional): A dictionary mapping column names to desired data types.
     Returns:
     - inferred_types (dict): A dictionary mapping column names to inferred data types.
+    - conversion_errors (dict): A dictionary mapping column names to conversion error messages.
     """
     if type_overrides is None:
         type_overrides = {}
     inferred_types = {}
+    conversion_errors = {}
+    
     # Define missing values and patterns
     missing_values = ["NA", "NaN", "N/A", "Not Available", "null", "", " ", "--", "-", "?", "missing", "undefined", "unknown", "N.A."]
     missing_value_patterns = [r'^\s*$', r'^-*$', r'^null$', r'^n/?a$', r'^not available$', r'^missing$', r'^undefined$', r'^unknown$', r'^n\.a\.$']
     missing_value_regex = re.compile('|'.join(missing_value_patterns), flags=re.IGNORECASE)
-
+    
     for col in df.columns:
         col_series = df[col]
         # Apply type override if specified
         if col in type_overrides:
             try:
-                df[col] = col_series.astype(type_overrides[col])
+                df[col] = col_series.astype(type_overrides[col], errors='raise')
                 inferred_types[col] = type_overrides[col]
                 continue
-            except (ValueError, TypeError):
-                pass  # Fall back to inference if conversion fails
-
+            except (ValueError, TypeError) as e:
+                # Store the error message for this column
+                error_msg = str(e)
+                conversion_errors[col] = {
+                    'requested_type': type_overrides[col],
+                    'error': error_msg,
+                    'sample_values': col_series.dropna().head(5).tolist()
+                }
+                # Continue with normal inference for this column
+        
         # Replace missing value strings with np.nan
         col_series.replace(missing_values, np.nan, inplace=True)
         col_series.replace(missing_value_regex, np.nan, inplace=True)
@@ -77,7 +87,6 @@ def infer_and_convert_dtypes(df, type_overrides=None):
                 except (ValueError, TypeError):
                     return np.nan
             col_datetime = col_series.apply(try_parse_date)
-            print(col_datetime)
             if col_datetime.notna().sum() / col_series.notna().sum() > 0.9:
                 df[col] = col_datetime
                 inferred_types[col] = 'datetime64[ns]'
@@ -137,15 +146,15 @@ def infer_and_convert_dtypes(df, type_overrides=None):
         df[col] = df[col].str.strip().str.lower()
         inferred_types[col] = 'string'
 
-    return inferred_types
+    return inferred_types, conversion_errors
 
-def process_file(file_path):
+def process_file(file_path, type_overrides=None):
     """
     Process the file by loading it and inferring data types.
     
     Parameters:
     - file_path (str): The path to the CSV or Excel file.
-    
+    - type_overrides (dict, optional): A dictionary mapping column names to desired data types.
     Returns:
     - df (DataFrame): The DataFrame with converted data types.
     - inferred_types (dict): The inferred data types for each column.
@@ -153,39 +162,38 @@ def process_file(file_path):
     # Determine file size to decide whether to use chunking
     file_size = os.path.getsize(file_path)
     use_chunking = file_size > 100 * 1024 * 1024  # 100 MB threshold
-
+    
     if use_chunking:
         # Process file in chunks
         chunks = load_data(file_path, chunksize=100000)
         inferred_types = {}
+        conversion_errors = {}
         df_list = []
-
+        
         for chunk in chunks:
-            # Infer and convert data types in-place
-            chunk_inferred_types = infer_and_convert_dtypes(chunk)
+            chunk_inferred_types, chunk_errors = infer_and_convert_dtypes(chunk, type_overrides)
             df_list.append(chunk)
-            # Merge inferred types, ensuring consistency
-            for col, dtype in chunk_inferred_types.items():
-                if col not in inferred_types:
-                    inferred_types[col] = dtype
-                elif inferred_types[col] != dtype:
-                    inferred_types[col] = 'string'  # Default to string if inconsistent
-
+            # Merge inferred types and errors
+            inferred_types.update(chunk_inferred_types)
+            conversion_errors.update(chunk_errors)
+            
         # Concatenate all chunks into a single DataFrame
         df = pd.concat(df_list, ignore_index=True)
     else:
         # Load entire file into DataFrame
         df = load_data(file_path)
-        # Infer and convert data types in-place
-        inferred_types = infer_and_convert_dtypes(df)
-
-    return df, inferred_types
+        inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+    
+    return df, inferred_types, conversion_errors
 
 # Example usage:
 if __name__ == '__main__':
     file_path = 'sample_data.csv'  # Replace with your file path
-    df, inferred_types = process_file(file_path)
+    df, inferred_types, conversion_errors = process_file(file_path)
     print(df)
     print("Inferred Data Types:")
     for col, dtype in inferred_types.items():
         print(f"{col}: {dtype}")
+    print("Conversion Errors:")
+    for col, error in conversion_errors.items():
+        print(f"{col}: {error['error']}")
