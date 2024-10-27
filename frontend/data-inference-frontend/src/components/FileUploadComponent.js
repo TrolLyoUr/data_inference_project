@@ -97,11 +97,11 @@ function FileUploadComponent() {
                   onChange={(e) => handleTypeChange(column, e.target.value)}
                 >
                   <option value="float64">Numeric (float64)</option>
-                  <option value="int64">Numeric (int64)</option>
+                  <option value="Int64">Numeric (Int64)</option>
                   <option value="datetime64[ns]">Date</option>
                   <option value="bool">Boolean</option>
                   <option value="category">Categorical</option>
-                  <option value="string">Text</option>
+                  <option value="object">Text</option>
                   <option value="empty">Empty</option>
                 </select>
                 {conversionErrors[column] && (

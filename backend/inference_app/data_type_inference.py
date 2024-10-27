@@ -117,27 +117,51 @@ def infer_and_convert_dtypes(df, type_overrides=None):
             df[col] = col_series.apply(lambda x: True if str(x).strip().lower() in true_values else False if str(x).strip().lower() in false_values else np.nan)
             inferred_types[col] = 'bool'
             continue
-
         # Attempt to clean and convert to numeric
         def clean_numeric(x):
             if pd.isnull(x):
                 return np.nan
+                
+            # Convert to string and clean whitespace
             x_str = str(x).strip()
-            x_str = re.sub(r'[^\d.,\-+eE]', '', x_str)
-            if x_str.count(',') > x_str.count('.'):
-                x_str = x_str.replace('.', '').replace(',', '.')
-            else:
-                x_str = x_str.replace(',', '')
+            
+            # Handle percentage values
+            if x_str.endswith('%'):
+                x_str = x_str[:-1]
+                try:
+                    return float(x_str) / 100
+                except ValueError:
+                    return np.nan
+                    
+            # Handle different decimal/thousand separator formats
+            if x_str.count('.') > 1:
+                # More dots than commas - assume dot is decimal separator
+                x_str = x_str.replace('.', '')
+            # Assume comma is thousand separator
+            x_str = x_str.replace(',', '')
+            
             try:
-                return float(x_str)
+                float(x_str)
+                return x_str
             except ValueError:
                 return np.nan
 
+        # Apply numeric cleaning to column
         col_numeric = col_series.apply(clean_numeric)
-        if col_numeric.notna().sum() / col_series.notna().sum() > 0.9:
-            df[col] = col_numeric
-            # Downcast numeric types
-            df[col] = pd.to_numeric(df[col], downcast='float')
+        
+        # Check what percentage of non-null values are numeric
+        numeric_mask = col_numeric.notna()
+        numeric_ratio = numeric_mask.sum() / numeric_mask.count()
+        
+        # If more than 90% of values can be converted to numeric, treat as numeric column
+        if numeric_ratio >= 0.8:
+            # Attempt to convert to nullable integer type
+            try:
+                df[col] = pd.to_numeric(df[col], errors='raise').astype('Int64')
+            except ValueError:
+                # If conversion to Int64 fails, convert to float
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            print(df[col].dtype)
             inferred_types[col] = str(df[col].dtype)
             continue
 
@@ -155,11 +179,9 @@ def infer_and_convert_dtypes(df, type_overrides=None):
             inferred_types[col] = 'category'
             continue
 
-        # Default to string
-        df[col] = col_series.astype('string')
-        # Normalize strings
-        df[col] = df[col].str.strip().str.lower()
-        inferred_types[col] = 'string'
+        # Default to object
+        df[col] = col_series.astype('object')
+        inferred_types[col] = 'object'
 
     return inferred_types, conversion_errors
 
