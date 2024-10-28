@@ -160,10 +160,10 @@ def infer_and_convert_dtypes(df, type_overrides=None):
         if numeric_ratio >= 0.8:
             # Attempt to convert to nullable integer type
             try:
-                df[col] = pd.to_numeric(df[col], errors='raise').astype('Int64')
-            except ValueError:
+                df[col] = pd.to_numeric(col_numeric, errors='raise').astype('Int64')
+            except Exception:
                 # If conversion to Int64 fails, convert to float
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = pd.to_numeric(col_numeric, errors='coerce')
             inferred_types[col] = str(df[col].dtype)
             continue
 
