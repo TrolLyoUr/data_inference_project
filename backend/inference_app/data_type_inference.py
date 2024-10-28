@@ -64,7 +64,10 @@ def infer_and_convert_dtypes(df, type_overrides=None):
         # Apply type override if specified
         if col in type_overrides:
             try:
-                df[col] = col_series.astype(type_overrides[col], errors='raise')
+                if type_overrides[col] == 'Int64' or type_overrides[col] == 'float64':
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                else:
+                    df[col] = col_series.astype(type_overrides[col], errors='raise')
                 inferred_types[col] = type_overrides[col]
                 continue
             except (ValueError, TypeError) as e:
