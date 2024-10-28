@@ -62,16 +62,30 @@ function FileUploadComponent() {
       });
   };
 
+  const typeOptions = {
+    float64: "Numeric (float64)",
+    Int64: "Numeric (Int64)",
+    "datetime64[ns]": "Date",
+    bool: "Boolean",
+    category: "Categorical",
+    object: "Text",
+    string: "Text",
+  };
+
+  const getDisplayType = (dtype) => {
+    return typeOptions[dtype] || dtype;
+  };
+
   return (
-    <div>
+    <div className="file-upload-container">
       <form onSubmit={handleSubmit}>
-        <div>
+        <div className="upload-section">
           <input
             type="file"
             accept=".csv, .xls, .xlsx"
             onChange={handleFileChange}
           />
-          <div>
+          <div className="header-checkbox">
             <label>
               <input
                 type="checkbox"
@@ -81,51 +95,224 @@ function FileUploadComponent() {
               File has headers
             </label>
           </div>
+          <button type="submit">Upload and Process</button>
         </div>
-        <button type="submit">Upload and Process</button>
       </form>
 
       {inferredTypes && (
-        <div>
-          <h3>Inferred Data Types:</h3>
-          <ul>
-            {Object.entries(inferredTypes).map(([column, dtype]) => (
-              <li key={column}>
-                {column}:
-                <select
-                  value={modifiedTypes[column] || dtype}
-                  onChange={(e) => handleTypeChange(column, e.target.value)}
-                >
-                  <option value="float64">Numeric (float64)</option>
-                  <option value="Int64">Numeric (Int64)</option>
-                  <option value="datetime64[ns]">Date</option>
-                  <option value="bool">Boolean</option>
-                  <option value="category">Categorical</option>
-                  <option value="object">Text</option>
-                </select>
-                {conversionErrors[column] && (
-                  <div className="error-message">
-                    <p>
-                      Error converting to{" "}
-                      {conversionErrors[column].requested_type}:
-                    </p>
-                    <p>{conversionErrors[column].error}</p>
-                    <p>
-                      Sample values:{" "}
-                      {conversionErrors[column].sample_values.join(", ")}
-                    </p>
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
+        <div className="types-container">
+          <div className="inferred-types">
+            <h3>Inferred Data Types:</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Column</th>
+                  <th>Inferred Type</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(inferredTypes).map(([column, dtype]) => (
+                  <tr key={column}>
+                    <td>{column}</td>
+                    <td>{getDisplayType(dtype)}</td>
+                    <td>
+                      <button
+                        onClick={() => handleTypeChange(column, dtype)}
+                        className={modifiedTypes[column] ? "active" : ""}
+                      >
+                        Modify Type
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
           {Object.keys(modifiedTypes).length > 0 && (
-            <button onClick={handleApplyTypes}>Apply Type Changes</button>
+            <div className="modified-types">
+              <h3>Type Modifications:</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Column</th>
+                    <th>Current Type</th>
+                    <th>New Type</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(modifiedTypes).map(([column, newType]) => (
+                    <tr key={column}>
+                      <td>{column}</td>
+                      <td>{inferredTypes[column]}</td>
+                      <td>
+                        <select
+                          value={newType}
+                          onChange={(e) =>
+                            handleTypeChange(column, e.target.value)
+                          }
+                        >
+                          {Object.entries(typeOptions).map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {value}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <button
+                          onClick={() => {
+                            setModifiedTypes((prev) => {
+                              const newTypes = { ...prev };
+                              delete newTypes[column];
+                              return newTypes;
+                            });
+                          }}
+                          className="remove-btn"
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <button onClick={handleApplyTypes} className="apply-btn">
+                Apply Type Changes
+              </button>
+            </div>
+          )}
+
+          {Object.keys(conversionErrors).length > 0 && (
+            <div className="conversion-errors">
+              <h3>Conversion Errors:</h3>
+              {Object.entries(conversionErrors).map(([column, error]) => (
+                <div key={column} className="error-message">
+                  <h4>Column: {column}</h4>
+                  <p>Failed to convert to {error.requested_type}</p>
+                  <p>Error: {error.error}</p>
+                  <p>Sample values: {error.sample_values.join(", ")}</p>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}
     </div>
   );
 }
+
+// Add some basic styling
+const styles = `
+.file-upload-container {
+  padding: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.upload-section {
+  margin-bottom: 20px;
+  padding: 15px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.types-container {
+  display: grid;
+  gap: 20px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+}
+
+th, td {
+  padding: 8px;
+  border: 1px solid #ddd;
+  text-align: left;
+}
+
+th {
+  background-color: #f5f5f5;
+}
+
+.error-message {
+  background-color: #fff3f3;
+  border: 1px solid #ffcdd2;
+  padding: 10px;
+  margin-top: 10px;
+  border-radius: 4px;
+}
+
+button {
+  padding: 6px 12px;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+  background-color: #fff;
+  cursor: pointer;
+}
+
+button:hover {
+  background-color: #f5f5f5;
+}
+
+button.active {
+  background-color: #e3f2fd;
+  border-color: #2196f3;
+}
+
+.apply-btn {
+  margin-top: 15px;
+  background-color: #4caf50;
+  color: white;
+  border: none;
+}
+
+.apply-btn:hover {
+  background-color: #45a049;
+}
+
+.remove-btn {
+  background-color: #f44336;
+  color: white;
+  border: none;
+}
+
+.remove-btn:hover {
+  background-color: #d32f2f;
+}
+
+select {
+  padding: 6px;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+}
+
+select:disabled {
+  background-color: #f5f5f5;
+  opacity: 1;
+  -webkit-text-fill-color: inherit;
+  color: inherit;
+  cursor: default;
+}
+
+.inferred-types select {
+  width: 200px;
+}
+
+.modified-types select {
+  width: 200px;
+  font-family: monospace;
+}
+`;
+
+// Add styles to document
+const styleSheet = document.createElement("style");
+styleSheet.innerText = styles;
+document.head.appendChild(styleSheet);
 
 export default FileUploadComponent;
