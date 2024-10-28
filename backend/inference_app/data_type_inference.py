@@ -168,44 +168,76 @@ def infer_and_convert_dtypes(df, type_overrides=None):
     inferred_types = {}
     conversion_errors = {}
     
-    # Define missing values and patterns
-    missing_values = ["NA", "NaN", "N/A", "Not Available", "null", "", " ", "--", "-", "?", "missing", "undefined", "unknown", "N.A."]
-    missing_value_patterns = [r'^\s*$', r'^-*$', r'^null$', r'^n/?a$', r'^not available$', r'^missing$', r'^undefined$', r'^unknown$', r'^n\.a\.$']
+    # Enhanced missing values detection
+    missing_values = [
+        "NA", "NaN", "N/A", "Not Available", "null", "", " ", "--", "-", "?",
+        "missing", "undefined", "unknown", "N.A.", "none", "nil", "(empty)",
+        "not specified", "n/s", "pending", "tbd", "to be determined"
+    ]
+    missing_value_patterns = [
+        r'^\s*$',
+        r'^-*$',
+        r'^null$',
+        r'^n/?a$',
+        r'^not\s+available$',
+        r'^missing$',
+        r'^undefined$',
+        r'^unknown$',
+        r'^n\.a\.$',
+        r'^none$',
+        r'^nil$',
+        r'^\(empty\)$',
+        r'^not\s+specified$',
+        r'^n/s$',
+        r'^pending$',
+        r'^tbd$',
+        r'^to\s+be\s+determined$'
+    ]
     missing_value_regex = re.compile('|'.join(missing_value_patterns), flags=re.IGNORECASE)
     
     for col in df.columns:
         col_series = df[col]
-        # Apply type override if specified
+        
+        # Handle type overrides
         if col in type_overrides:
             try:
-                if type_overrides[col] == 'Int64' or type_overrides[col] == 'float64':
+                if type_overrides[col] in ('Int64', 'float64'):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                 else:
                     df[col] = col_series.astype(type_overrides[col], errors='raise')
                 inferred_types[col] = type_overrides[col]
                 continue
             except (ValueError, TypeError) as e:
-                # Store the error message for this column
-                error_msg = str(e)
                 conversion_errors[col] = {
                     'requested_type': type_overrides[col],
-                    'error': error_msg,
+                    'error': str(e),
                     'sample_values': col_series.dropna().head(5).tolist()
                 }
-                # Continue with normal inference for this column
-        
-        # Replace missing value strings with np.nan
+
+        # Clean and standardize the data
+        if col_series.dtype == 'object':
+            col_series = col_series.astype(str).str.strip().str.lower()
+            
+        # Replace missing values
         col_series.replace(missing_values, np.nan, inplace=True)
         col_series.replace(missing_value_regex, np.nan, inplace=True)
-        # Skip columns with all NaN values
+
+        # Skip empty columns
         if col_series.dropna().empty:
             inferred_types[col] = 'object'
             continue
 
-        # Try to infer as datetime
-        col_datetime = pd.to_datetime(col_series, errors='coerce', format='mixed')
-        if col_datetime.notna().sum() / col_series.notna().sum() > 0.9:
-            df[col] = col_datetime
+        # Sample data for faster inference
+        sample_size = min(1000, len(col_series))
+        col_sample = col_series.sample(n=sample_size) if len(col_series) > sample_size else col_series
+
+        # Try to infer as datetime using multiple approaches
+        is_datetime = False
+        
+        # First try pandas datetime inference
+        datetime_series = pd.to_datetime(col_sample, errors='coerce', format='mixed')
+        if datetime_series.notna().sum() / col_sample.notna().sum() > 0.9:
+            df[col] = pd.to_datetime(col_series, errors='coerce', format='mixed')
             inferred_types[col] = 'datetime64[ns]'
             continue
         else:
@@ -218,20 +250,30 @@ def infer_and_convert_dtypes(df, type_overrides=None):
                     return parse(str(x))
                 except (ValueError, TypeError):
                     return np.nan
-            col_datetime = col_series.apply(try_parse_date)
-            if col_datetime.notna().sum() / col_series.notna().sum() > 0.9:
+            col_datetime = col_sample.apply(try_parse_date)
+            if col_datetime.notna().sum() / col_sample.notna().sum() > 0.9:
                 df[col] = col_datetime
                 inferred_types[col] = 'datetime64[ns]'
                 continue
 
-        # Check for boolean
-        boolean_values = {'0', '1', 0, 1, True, False, 'True', 'False', 'true', 'false',
-                          'yes', 'no', 'y', 'n', 't', 'f', 'on', 'off', 'enabled', 'disabled'}
-        true_values = {'1', 1, True, 'True', 'true', 'yes', 'y', 't', 'on', 'enabled'}
-        false_values = {'0', 0, False, 'False', 'false', 'no', 'n', 'f', 'off', 'disabled'}
-        unique_values = set(str(x).strip().lower() for x in col_series.dropna().unique())
-        if unique_values.issubset(boolean_values):
-            df[col] = col_series.apply(lambda x: True if str(x).strip().lower() in true_values else False if str(x).strip().lower() in false_values else np.nan)
+        # Enhanced boolean detection
+        boolean_values = {
+            'true': True, 'false': False,
+            'yes': True, 'no': False,
+            'y': True, 'n': False,
+            't': True, 'f': False,
+            '1': True, '0': False,
+            'on': True, 'off': False,
+            'enabled': True, 'disabled': False,
+            'active': True, 'inactive': False,
+            'positive': True, 'negative': False,
+            'success': True, 'failure': False,
+            'pass': True, 'fail': False,
+        }
+        
+        unique_values = set(str(x).strip().lower() for x in col_sample.dropna().unique())
+        if unique_values.issubset(boolean_values.keys()):
+            df[col] = col_series.map(lambda x: boolean_values.get(str(x).strip().lower(), np.nan))
             inferred_types[col] = 'bool'
             continue
         # Attempt to clean and convert to numeric
@@ -240,22 +282,30 @@ def infer_and_convert_dtypes(df, type_overrides=None):
                 return np.nan
                 
             # Convert to string and clean whitespace
-            x_str = str(x).strip()
+            x_str = str(x).strip().lower()
             
-            # Handle percentage values
+            # Handle currency symbols
+            currency_symbols = r'[$€£¥]'
+            x_str = re.sub(currency_symbols, '', x_str)
+            
+            # Handle percentages
             if x_str.endswith('%'):
-                x_str = x_str[:-1]
                 try:
-                    return float(x_str) / 100
+                    return float(x_str.rstrip('%')) / 100
                 except ValueError:
                     return np.nan
-                    
-            # Handle different decimal/thousand separator formats
-            if x_str.count('.') > 1:
-                # More dots than commas - assume dot is decimal separator
-                x_str = x_str.replace('.', '')
-            # Assume comma is thousand separator
+            
+            # Handle scientific notation
+            if 'e' in x_str and not any(c.isalpha() for c in x_str.replace('e', '')):
+                try:
+                    return float(x_str)
+                except ValueError:
+                    return np.nan
+            
+            # Handle thousands/decimal separators
             x_str = x_str.replace(',', '')
+            if x_str.count('.') > 1:
+                x_str = x_str.replace('.', '', x_str.count('.') - 1)
             
             try:
                 float(x_str)
@@ -263,15 +313,13 @@ def infer_and_convert_dtypes(df, type_overrides=None):
             except ValueError:
                 return np.nan
 
-        # Apply numeric cleaning to column
-        col_numeric = col_series.apply(clean_numeric)
-        
-        # Check what percentage of non-null values are numeric
-        numeric_mask = col_numeric.notna()
-        numeric_ratio = numeric_mask.sum() / numeric_mask.count()
-        
-        # If more than 90% of values can be converted to numeric, treat as numeric column
+        # Apply numeric cleaning and check ratio
+        numeric_series = col_sample.apply(clean_numeric)
+        numeric_ratio = numeric_series.notna().sum() / numeric_series.notna().count()
+
         if numeric_ratio >= 0.8:
+            # Apply numeric cleaning to the full column
+            col_numeric = col_series.apply(clean_numeric)
             # Attempt to convert to nullable integer type
             try:
                 df[col] = pd.to_numeric(col_numeric, errors='raise').astype('Int64')
@@ -295,7 +343,7 @@ def infer_and_convert_dtypes(df, type_overrides=None):
             inferred_types[col] = 'category'
             continue
 
-        # Default to object
+        # Default to object type
         df[col] = col_series.astype('object')
         inferred_types[col] = 'object'
 
