@@ -203,6 +203,7 @@ def infer_and_convert_dtypes(df, type_overrides=None):
             try:
                 if type_overrides[col] in ('Int64', 'float64'):
                     df[col] = pd.to_numeric(df[col], errors='coerce')
+                    df[col].fillna('', inplace=True)
                 else:
                     df[col] = col_series.astype(type_overrides[col], errors='raise')
                 inferred_types[col] = type_overrides[col]
@@ -213,10 +214,6 @@ def infer_and_convert_dtypes(df, type_overrides=None):
                     'error': str(e),
                     'sample_values': col_series.dropna().head(5).tolist()
                 }
-
-        # Clean and standardize the data
-        if col_series.dtype == 'object':
-            col_series = col_series.astype(str).str.strip().str.lower()
             
         # Replace missing values
         col_series.replace(missing_values, np.nan, inplace=True)
@@ -230,9 +227,6 @@ def infer_and_convert_dtypes(df, type_overrides=None):
         # Sample data for faster inference
         sample_size = min(1000, len(col_series))
         col_sample = col_series.sample(n=sample_size) if len(col_series) > sample_size else col_series
-
-        # Try to infer as datetime using multiple approaches
-        is_datetime = False
         
         # First try pandas datetime inference
         datetime_series = pd.to_datetime(col_sample, errors='coerce', format='mixed')
@@ -351,9 +345,16 @@ def infer_and_convert_dtypes(df, type_overrides=None):
 
 def process_file(file_path: str, type_overrides: Optional[Dict] = None, has_headers: bool = True) -> Tuple[pd.DataFrame, Dict, Dict]:
     """
-    Process the file with improved encoding handling.
+    Process the file with improved encoding handling and file saving.
     """
     try:
+        # Check if processed file exists
+        processed_path = f"{os.path.splitext(file_path)[0]}_processed.csv"
+        if os.path.exists(processed_path) and not type_overrides:
+            df = pd.read_csv(processed_path)
+            inferred_types = {col: str(df[col].dtype) for col in df.columns}
+            return df, inferred_types, {}
+
         file_size = os.path.getsize(file_path)
         use_chunking = file_size > 100 * 1024 * 1024  # 100 MB threshold
         

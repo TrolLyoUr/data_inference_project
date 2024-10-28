@@ -7,6 +7,10 @@ function FileUploadComponent() {
   const [modifiedTypes, setModifiedTypes] = useState({});
   const [conversionErrors, setConversionErrors] = useState({});
   const [hasHeaders, setHasHeaders] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [pageSize, setPageSize] = useState(10);
+  const [dataPreview, setDataPreview] = useState(null);
 
   const handleFileChange = (e) => {
     setFile(e.target.files[0]);
@@ -24,17 +28,53 @@ function FileUploadComponent() {
     e.preventDefault();
     if (!file) return;
 
+    // Reset states on new file upload
+    setCurrentPage(1);
+    setConversionErrors({});
+    setModifiedTypes({});
+
     const formData = new FormData();
     formData.append("file", file);
     formData.append("has_headers", hasHeaders);
+    formData.append("page", 1);
+    formData.append("page_size", pageSize);
 
     axios
       .post("/api/upload/", formData)
       .then((response) => {
         setInferredTypes(response.data.inferred_types);
+        setDataPreview(response.data.data_preview);
+        setTotalPages(Math.ceil(response.data.total_rows / pageSize));
       })
       .catch((error) => {
         console.error("Error uploading file:", error);
+      });
+  };
+
+  const handlePageInput = (e) => {
+    const value = parseInt(e.target.value);
+    if (!isNaN(value) && value > 0 && value <= totalPages) {
+      handlePageChange(value);
+    }
+  };
+
+  const handlePageChange = (newPage) => {
+    setCurrentPage(newPage);
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("has_headers", hasHeaders);
+    formData.append("page", newPage);
+    formData.append("page_size", pageSize);
+
+    axios
+      .post("/api/upload/", formData)
+      .then((response) => {
+        setDataPreview(response.data.data_preview);
+      })
+      .catch((error) => {
+        console.error("Error fetching page:", error);
       });
   };
 
@@ -44,11 +84,15 @@ function FileUploadComponent() {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("type_overrides", JSON.stringify(modifiedTypes));
+    formData.append("page", currentPage);
+    formData.append("page_size", pageSize);
 
     axios
       .post("/api/upload/", formData)
       .then((response) => {
         setInferredTypes(response.data.inferred_types);
+        setDataPreview(response.data.data_preview);
+        setTotalPages(Math.ceil(response.data.total_rows / pageSize));
         setConversionErrors({});
         setModifiedTypes({});
       })
@@ -56,6 +100,8 @@ function FileUploadComponent() {
         if (error.response?.data?.conversion_errors) {
           setConversionErrors(error.response.data.conversion_errors);
           setInferredTypes(error.response.data.inferred_types);
+          setDataPreview(error.response.data.data_preview);
+          setTotalPages(Math.ceil(error.response.data.total_rows / pageSize));
         } else {
           console.error("Error applying type changes:", error);
         }
@@ -198,6 +244,70 @@ function FileUploadComponent() {
               ))}
             </div>
           )}
+
+          {dataPreview && (
+            <div className="data-preview">
+              <h3>Data Preview:</h3>
+              <table>
+                <thead>
+                  <tr>
+                    {Object.keys(dataPreview[0] || {}).map((header) => (
+                      <th key={header}>{header}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {dataPreview.map((row, idx) => (
+                    <tr key={idx}>
+                      {Object.values(row).map((value, cellIdx) => (
+                        <td key={cellIdx}>{value}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <div className="pagination">
+                <button
+                  onClick={() => handlePageChange(currentPage - 1)}
+                  disabled={currentPage === 1}
+                >
+                  Previous
+                </button>
+
+                <input
+                  type="number"
+                  value={currentPage}
+                  onChange={(e) => handlePageInput(e)}
+                  min={1}
+                  max={totalPages}
+                  className="page-input"
+                />
+                <span> of {totalPages}</span>
+
+                <button
+                  onClick={() => handlePageChange(currentPage + 1)}
+                  disabled={currentPage === totalPages}
+                >
+                  Next
+                </button>
+
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setCurrentPage(1);
+                    handlePageChange(1);
+                  }}
+                >
+                  <option value="10">10 rows</option>
+                  <option value="25">25 rows</option>
+                  <option value="50">50 rows</option>
+                  <option value="100">100 rows</option>
+                </select>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -307,6 +417,50 @@ select:disabled {
 .modified-types select {
   width: 200px;
   font-family: monospace;
+}
+
+.data-preview {
+  margin-top: 20px;
+  overflow-x: auto;
+}
+
+.pagination {
+  margin-top: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.pagination button {
+  padding: 5px 10px;
+}
+
+.pagination button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pagination span {
+  margin: 0 10px;
+}
+
+.pagination select {
+  margin-left: 10px;
+}
+
+.page-input {
+  width: 60px;
+  padding: 4px;
+  margin: 0 8px;
+  text-align: center;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.page-input::-webkit-inner-spin-button,
+.page-input::-webkit-outer-spin-button {
+  opacity: 1;
 }
 `;
 
