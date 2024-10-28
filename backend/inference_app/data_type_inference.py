@@ -3,38 +3,152 @@ import numpy as np
 import os
 from dateutil.parser import parse
 import re
+import chardet
+from typing import Optional, Tuple, Dict
+import codecs
 
-def load_data(file_path, has_headers=True, chunksize=None):
+def detect_encoding(file_path: str, sample_size: int = 10000) -> str:
     """
-    Load data from a CSV or Excel file into a Pandas DataFrame.
+    Detect the encoding of a file using chardet.
     
     Parameters:
-    - file_path (str): The path to the CSV or Excel file.
-    - has_headers (bool): Whether the file has headers in the first row.
-    - chunksize (int, optional): The number of rows per chunk (for large files).
+    - file_path: Path to the file
+    - sample_size: Number of bytes to sample for detection
     
     Returns:
-    - df (DataFrame or TextFileReader): The loaded DataFrame or an iterator for chunked processing.
+    - detected encoding
+    """
+    with open(file_path, 'rb') as file:
+        raw_data = file.read(sample_size)
+    result = chardet.detect(raw_data)
+    return result['encoding'] or 'utf-8'
+
+def validate_encoding(file_path: str, encoding: str) -> bool:
+    """
+    Validate if an encoding can read the entire file without errors.
+    
+    Parameters:
+    - file_path: Path to the file
+    - encoding: Encoding to validate
+    
+    Returns:
+    - True if encoding is valid, False otherwise
+    """
+    try:
+        with codecs.open(file_path, 'r', encoding=encoding) as f:
+            # Read file in chunks to avoid memory issues
+            while f.read(1024):
+                pass
+        return True
+    except UnicodeDecodeError:
+        return False
+
+def get_valid_encoding(file_path: str) -> str:
+    """
+    Get a valid encoding for the file, trying multiple options if needed.
+    
+    Parameters:
+    - file_path: Path to the file
+    
+    Returns:
+    - valid encoding
+    """
+    # Common encodings to try in order of likelihood
+    encodings_to_try = [
+        detect_encoding(file_path),  # Try detected encoding first
+        'utf-8',
+        'utf-8-sig',  # UTF-8 with BOM
+        'cp1252',     # Windows-1252
+        'iso-8859-1', # Latin-1
+        'ascii',
+        'utf-16',
+        'utf-32',
+        'big5',       # Traditional Chinese
+        'gb2312',     # Simplified Chinese
+        'shift-jis',  # Japanese
+        'euc-kr',     # Korean
+    ]
+    
+    # Try each encoding
+    for encoding in encodings_to_try:
+        if encoding and validate_encoding(file_path, encoding):
+            return encoding
+            
+    raise ValueError("Unable to determine valid encoding for the file")
+
+def load_data(file_path: str, has_headers: bool = True, chunksize: Optional[int] = None) -> pd.DataFrame:
+    """
+    Load data from a CSV or Excel file into a Pandas DataFrame with encoding detection.
+    
+    Parameters:
+    - file_path: Path to the file
+    - has_headers: Whether the file has headers
+    - chunksize: Number of rows to read at a time
+    
+    Returns:
+    - DataFrame or TextFileReader
     """
     file_ext = os.path.splitext(file_path)[1].lower()
     
     if file_ext == '.csv':
-        if has_headers:
-            return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
-        else:
-            # Generate column names if no headers
-            df = pd.read_csv(file_path, header=None, chunksize=chunksize, low_memory=False)
-            if not chunksize:
-                df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+        try:
+            # First try to detect and validate encoding
+            encoding = get_valid_encoding(file_path)
+            
+            # Common CSV reading parameters
+            csv_params = {
+                'encoding': encoding,
+                'chunksize': chunksize,
+                'low_memory': False,
+                'on_bad_lines': 'warn',  # Log warning for bad lines instead of failing
+                'encoding_errors': 'replace',  # Replace invalid characters
+            }
+            
+            if has_headers:
+                df = pd.read_csv(file_path, **csv_params)
+            else:
+                df = pd.read_csv(file_path, header=None, **csv_params)
+                if not chunksize:
+                    df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+            
             return df
+            
+        except Exception as e:
+            # If initial reading fails, try with different parameters
+            try:
+                # Try with more permissive parameters
+                csv_params.update({
+                    'sep': None,  # Let pandas detect the separator
+                    'engine': 'python',  # Python engine is more flexible
+                    'encoding_errors': 'replace',
+                    'quoting': 3,  # QUOTE_NONE
+                    'dtype': str,  # Read everything as string initially
+                })
+                
+                if has_headers:
+                    df = pd.read_csv(file_path, **csv_params)
+                else:
+                    df = pd.read_csv(file_path, header=None, **csv_params)
+                    if not chunksize:
+                        df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+                
+                return df
+                
+            except Exception as e2:
+                raise ValueError(f"Failed to read CSV file. Errors:\n1. {str(e)}\n2. {str(e2)}")
+    
     elif file_ext in ['.xls', '.xlsx']:
-        if has_headers:
-            return pd.read_excel(file_path, chunksize=chunksize)
-        else:
-            df = pd.read_excel(file_path, header=None, chunksize=chunksize)
-            if not chunksize:
-                df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
-            return df
+        try:
+            # Excel files don't need encoding detection
+            if has_headers:
+                return pd.read_excel(file_path, chunksize=chunksize)
+            else:
+                df = pd.read_excel(file_path, header=None, chunksize=chunksize)
+                if not chunksize:
+                    df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+                return df
+        except Exception as e:
+            raise ValueError(f"Failed to read Excel file: {str(e)}")
     else:
         raise ValueError("Unsupported file format. Please provide a CSV or Excel file.")
 
@@ -187,37 +301,51 @@ def infer_and_convert_dtypes(df, type_overrides=None):
 
     return inferred_types, conversion_errors
 
-def process_file(file_path, type_overrides=None, has_headers=True):
+def process_file(file_path: str, type_overrides: Optional[Dict] = None, has_headers: bool = True) -> Tuple[pd.DataFrame, Dict, Dict]:
     """
-    Process the file by loading it and inferring data types.
+    Process the file with improved encoding handling.
     """
-    file_size = os.path.getsize(file_path)
-    use_chunking = file_size > 100 * 1024 * 1024  # 100 MB threshold
-    
-    if use_chunking:
-        chunks = load_data(file_path, has_headers=has_headers, chunksize=100000)
-        inferred_types = {}
-        conversion_errors = {}
-        df_list = []
+    try:
+        file_size = os.path.getsize(file_path)
+        use_chunking = file_size > 100 * 1024 * 1024  # 100 MB threshold
         
-        # For the first chunk, generate column names if no headers
-        first_chunk = True
-        for chunk in chunks:
-            if first_chunk and not has_headers:
-                chunk.columns = [f'Column_{i+1}' for i in range(len(chunk.columns))]
-                first_chunk = False
-                
-            chunk_inferred_types, chunk_errors = infer_and_convert_dtypes(chunk, type_overrides)
-            df_list.append(chunk)
-            inferred_types.update(chunk_inferred_types)
-            conversion_errors.update(chunk_errors)
+        if use_chunking:
+            chunks = load_data(file_path, has_headers=has_headers, chunksize=100000)
+            inferred_types = {}
+            conversion_errors = {}
+            df_list = []
             
-        df = pd.concat(df_list, ignore_index=True)
-    else:
-        df = load_data(file_path, has_headers=has_headers)
-        inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+            first_chunk = True
+            for chunk in chunks:
+                if first_chunk and not has_headers:
+                    chunk.columns = [f'Column_{i+1}' for i in range(len(chunk.columns))]
+                    first_chunk = False
+                
+                # Clean the chunk data
+                for col in chunk.columns:
+                    chunk[col] = chunk[col].astype(str).apply(lambda x: x.strip() if isinstance(x, str) else x)
+                
+                chunk_types, chunk_errors = infer_and_convert_dtypes(chunk, type_overrides)
+                df_list.append(chunk)
+                inferred_types.update(chunk_types)
+                conversion_errors.update(chunk_errors)
+            
+            df = pd.concat(df_list, ignore_index=True)
+        else:
+            df = load_data(file_path, has_headers=has_headers)
+            if not has_headers:
+                df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+            
+            # Clean the data
+            for col in df.columns:
+                df[col] = df[col].astype(str).apply(lambda x: x.strip() if isinstance(x, str) else x)
+            
+            inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+        
+        return df, inferred_types, conversion_errors
     
-    return df, inferred_types, conversion_errors
+    except Exception as e:
+        raise ValueError(f"Error processing file: {str(e)}")
 
 # Example usage:
 if __name__ == '__main__':
