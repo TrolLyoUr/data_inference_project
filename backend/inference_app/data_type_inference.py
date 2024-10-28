@@ -85,7 +85,7 @@ def infer_and_convert_dtypes(df, type_overrides=None):
         col_series.replace(missing_value_regex, np.nan, inplace=True)
         # Skip columns with all NaN values
         if col_series.dropna().empty:
-            inferred_types[col] = 'empty'
+            inferred_types[col] = 'object'
             continue
 
         # Try to infer as datetime

@@ -102,7 +102,6 @@ function FileUploadComponent() {
                   <option value="bool">Boolean</option>
                   <option value="category">Categorical</option>
                   <option value="object">Text</option>
-                  <option value="empty">Empty</option>
                 </select>
                 {conversionErrors[column] && (
                   <div className="error-message">
