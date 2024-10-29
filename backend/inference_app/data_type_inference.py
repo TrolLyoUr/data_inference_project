@@ -4,8 +4,11 @@ import os
 from dateutil.parser import parse
 import re
 import chardet
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Union, Literal
 import codecs
+from enum import Enum
+from pyspark.sql import SparkSession
+import pyspark.pandas as ps
 
 def detect_encoding(file_path: str, sample_size: int = 10000) -> str:
     """
@@ -364,58 +367,190 @@ def infer_and_convert_dtypes(df, type_overrides=None):
 
     return inferred_types, conversion_errors
 
-def process_file(file_path: str, type_overrides: Optional[Dict] = None, has_headers: bool = True) -> Tuple[pd.DataFrame, Dict, Dict]:
-    """
-    Process the file with improved encoding handling and file saving.
-    """
-    try:
-        # Check if processed file exists
-        processed_path = f"{os.path.splitext(file_path)[0]}_processed.csv"
-        if os.path.exists(processed_path) and not type_overrides:
-            df = pd.read_csv(processed_path)
-            inferred_types = {col: str(df[col].dtype) for col in df.columns}
-            return df, inferred_types, {}
+class ProcessingMethod(Enum):
+    NATIVE_CHUNKING = "native_chunking"
+    SPARK = "spark"
+    SINGLE_THREAD = "single_thread"
 
-        file_size = os.path.getsize(file_path)
-        use_chunking = file_size > 100 * 1024 * 1024  # 100 MB threshold
+def create_spark_session(app_name: str = "DataTypeInference") -> Optional[SparkSession]:
+    """Create or get existing Spark session with error handling"""
+    try:
+        spark = SparkSession.builder \
+            .appName(app_name) \
+            .master("local[*]") \
+            .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+            .config("spark.sql.execution.arrow.maxRecordsPerBatch", "100000") \
+            .config("spark.sql.adaptive.enabled", "true") \
+            .config("spark.sql.broadcastTimeout", "600") \
+            .config("spark.driver.memory", "4g") \
+            .config("spark.executor.memory", "4g") \
+            .config("spark.driver.maxResultSize", "2g") \
+            .getOrCreate()
         
-        if use_chunking:
-            chunks = load_data(file_path, has_headers=has_headers, chunksize=100000)
-            inferred_types = {}
-            conversion_errors = {}
-            df_list = []
-            
-            first_chunk = True
-            for chunk in chunks:
-                if first_chunk and not has_headers:
-                    chunk.columns = [f'Column_{i+1}' for i in range(len(chunk.columns))]
-                    first_chunk = False
-                
-                # Clean the chunk data
-                for col in chunk.columns:
-                    chunk[col] = chunk[col].astype(str).apply(lambda x: x.strip() if isinstance(x, str) else x)
-                
-                chunk_types, chunk_errors = infer_and_convert_dtypes(chunk, type_overrides)
-                df_list.append(chunk)
-                inferred_types.update(chunk_types)
-                conversion_errors.update(chunk_errors)
-            
-            df = pd.concat(df_list, ignore_index=True)
-        else:
-            df = load_data(file_path, has_headers=has_headers)
-            if not has_headers:
-                df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
-            
-            # Clean the data
-            for col in df.columns:
-                df[col] = df[col].astype(str).apply(lambda x: x.strip() if isinstance(x, str) else x)
-            
-            inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+        # Set log level to DEBUG for more detailed output
+        # spark.sparkContext.setLogLevel("DEBUG")
         
-        return df, inferred_types, conversion_errors
-    
+        return spark
     except Exception as e:
+        print(f"Failed to create Spark session: {str(e)}")
+        return None
+
+def process_with_spark(file_path: str, 
+                      spark: Optional[SparkSession] = None,
+                      type_overrides: Optional[Dict] = None,
+                      has_headers: bool = True) -> Tuple[pd.DataFrame, Dict, Dict]:
+    """Process file using Pandas API on Spark with fallback"""
+    try:
+        if spark is None:
+            spark = create_spark_session()
+        
+        if spark is None:
+            # Fallback to native chunking if Spark is unavailable
+            print("Spark unavailable, falling back to native chunking")
+            chunks = load_data(file_path, has_headers=has_headers, chunksize=100000)
+            return process_chunks(chunks, has_headers, type_overrides)
+            
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        try:
+            # Initialize Pandas on Spark
+            ps.set_option('compute.default_index_type', 'distributed')
+            
+            # Read file using Pandas API on Spark
+            if file_ext == '.csv':
+                psdf = ps.read_csv(
+                    file_path,
+                    header=0 if has_headers else None
+                )
+            elif file_ext in ['.xls', '.xlsx']:
+                pdf = pd.read_excel(file_path, header=0 if has_headers else None)
+                psdf = ps.DataFrame(pdf)
+            else:
+                raise ValueError("Unsupported file format for Spark processing")
+
+            # Set column names if no headers
+            if not has_headers:
+                psdf.columns = [f'Column_{i+1}' for i in range(len(psdf.columns))]
+
+            # Clean the data using Pandas API on Spark
+            for col in psdf.columns:
+                if psdf[col].dtype == 'object':
+                    psdf[col] = psdf[col].str.strip()
+
+            # Convert to pandas for type inference
+            pdf = psdf.to_pandas()
+            
+            # Apply type inference
+            inferred_types, conversion_errors = infer_and_convert_dtypes(pdf, type_overrides)
+            
+            return pdf, inferred_types, conversion_errors
+
+        finally:
+            # Clean up Spark resources
+            if spark:
+                try:
+                    spark.catalog.clearCache()
+                except Exception as e:
+                    print(f"Error clearing Spark cache: {str(e)}")
+
+    except Exception as e:
+        print(f"Error in Spark processing: {str(e)}")
+        # Fallback to native chunking
+        chunks = load_data(file_path, has_headers=has_headers, chunksize=100000)
+        return process_chunks(chunks, has_headers, type_overrides)
+
+def determine_processing_method(file_path: str, 
+                              requested_method: ProcessingMethod, 
+                              size_threshold: int) -> ProcessingMethod:
+    """Determine the most appropriate processing method based on file size and format"""
+    file_size = os.path.getsize(file_path)
+    file_ext = os.path.splitext(file_path)[1].lower()
+    
+    # For very large files, prefer Spark
+    if file_size > size_threshold * 10:  # 1GB+
+        return ProcessingMethod.SPARK
+    
+    # For medium-sized files, use the requested method or native chunking
+    if file_size > size_threshold:  # 100MB+
+        return requested_method if requested_method != ProcessingMethod.SINGLE_THREAD else ProcessingMethod.NATIVE_CHUNKING
+    
+    # For small files, use single thread unless specifically requested otherwise
+    return requested_method if requested_method != ProcessingMethod.SPARK else ProcessingMethod.SINGLE_THREAD
+
+def process_file(
+    file_path: str, 
+    type_overrides: Optional[Dict] = None, 
+    has_headers: bool = True,
+    processing_method: Union[ProcessingMethod, str] = ProcessingMethod.SINGLE_THREAD,
+    spark_session: Optional[SparkSession] = None,
+    chunk_size: int = 100000,
+    size_threshold: int = 100 * 1024 * 1024  # 100 MB
+) -> Tuple[pd.DataFrame, Dict, Dict]:
+    """Process file with smart method selection and error handling"""
+    try:
+        # Convert string to enum if necessary
+        if isinstance(processing_method, str):
+            processing_method = ProcessingMethod(processing_method.lower())
+
+        # Determine the most appropriate processing method
+        # processing_method = determine_processing_method(file_path, processing_method, size_threshold)
+
+        # Process according to determined method
+        if processing_method == ProcessingMethod.SPARK:
+            return process_with_spark(file_path, spark_session, type_overrides, has_headers)
+        
+        elif processing_method == ProcessingMethod.NATIVE_CHUNKING:
+            chunks = load_data(file_path, has_headers=has_headers, chunksize=chunk_size)
+            return process_chunks(chunks, has_headers, type_overrides)
+        
+        else:  # SINGLE_THREAD
+            return process_single_thread(file_path, has_headers, type_overrides)
+
+    except Exception as e:
+        # If Spark fails, try falling back to native chunking
+        if processing_method == ProcessingMethod.SPARK:
+            print(f"Spark processing failed, falling back to native chunking: {str(e)}")
+            chunks = load_data(file_path, has_headers=has_headers, chunksize=chunk_size)
+            return process_chunks(chunks, has_headers, type_overrides)
         raise ValueError(f"Error processing file: {str(e)}")
+
+def process_single_thread(file_path: str, 
+                         has_headers: bool, 
+                         type_overrides: Optional[Dict]) -> Tuple[pd.DataFrame, Dict, Dict]:
+    """Process file in single thread mode"""
+    df = load_data(file_path, has_headers=has_headers)
+    if not has_headers:
+        df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+    
+    # Clean the data
+    for col in df.columns:
+        df[col] = df[col].astype(str).apply(lambda x: x.strip() if isinstance(x, str) else x)
+    
+    inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+    return df, inferred_types, conversion_errors
+
+def process_chunks(chunks, has_headers: bool, type_overrides: Optional[Dict]) -> Tuple[pd.DataFrame, Dict, Dict]:
+    """Process data in chunks"""
+    inferred_types = {}
+    conversion_errors = {}
+    df_list = []
+    
+    first_chunk = True
+    for chunk in chunks:
+        if first_chunk and not has_headers:
+            chunk.columns = [f'Column_{i+1}' for i in range(len(chunk.columns))]
+            first_chunk = False
+        
+        # Clean the chunk data
+        for col in chunk.columns:
+            chunk[col] = chunk[col].astype(str).apply(lambda x: x.strip() if isinstance(x, str) else x)
+        
+        chunk_types, chunk_errors = infer_and_convert_dtypes(chunk, type_overrides)
+        df_list.append(chunk)
+        inferred_types.update(chunk_types)
+        conversion_errors.update(chunk_errors)
+    
+    return pd.concat(df_list, ignore_index=True), inferred_types, conversion_errors
 
 # Example usage:
 if __name__ == '__main__':

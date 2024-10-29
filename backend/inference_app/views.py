@@ -6,7 +6,7 @@ import pandas as pd
 import os
 from .serializers import UploadedFileSerializer
 from .models import UploadedFile
-from .data_type_inference import process_file  # Import your inference function
+from .data_type_inference import process_file, ProcessingMethod  # Import your inference function
 
 class FileUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser]
@@ -31,16 +31,24 @@ class FileUploadView(APIView):
             page_size = int(request.data.get('page_size', 10))
             
             # Process file and store DataFrame
+            import time
+            start_time = time.time()
+            
             df, inferred_types, conversion_errors = process_file(
                 self.file_path, 
                 type_overrides=type_overrides,
-                has_headers=has_headers
+                has_headers=has_headers,
+                processing_method=ProcessingMethod.SPARK
             )
+            
+            process_time = time.time() - start_time
+            print(f"Process file execution time: {process_time:.2f} seconds")
+            
             self.current_df = df
             
             # Save processed DataFrame
             processed_path = f"{os.path.splitext(self.file_path)[0]}_processed.csv"
-            df.to_csv(processed_path, index=False)
+            # df.to_csv(processed_path, index=False)
             
             # Calculate pagination
             total_rows = len(df)
@@ -48,13 +56,12 @@ class FileUploadView(APIView):
             end_idx = start_idx + page_size
             
             data_preview = df.iloc[start_idx:end_idx].to_dict('records')
-            print(data_preview)
             
             response_data = {
                 'inferred_types': inferred_types,
                 'conversion_errors': conversion_errors,
                 'data_preview': data_preview,
-                'total_rows': total_rows
+                'total_rows': total_rows,
             }
             
             if conversion_errors:
