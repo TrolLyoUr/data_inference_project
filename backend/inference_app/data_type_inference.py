@@ -323,16 +323,37 @@ def infer_and_convert_dtypes(df, type_overrides=None):
             inferred_types[col] = str(df[col].dtype)
             continue
 
-        # Check for categorical
-        if len(col_series) < 1000:
-            max_unique_ratio = 0.5  # More lenient for small datasets
+        # Check for categorical based on both unique ratio and absolute count
+        unique_count = col_series.nunique(dropna=True)
+        unique_ratio = unique_count / len(col_series)
+        
+        # Define thresholds based on dataset size with more granular ranges
+        if len(col_series) < 10:
+            max_unique_ratio = 0.5    # Very lenient for tiny datasets
+            max_unique_count = 3     # Few distinct values for tiny datasets
+        elif len(col_series) < 100:
+            max_unique_ratio = 0.5    # Very lenient for tiny datasets
+            max_unique_count = 10     # Few distinct values for tiny datasets
+        elif len(col_series) < 1000:
+            max_unique_ratio = 0.4    # Lenient for small datasets
+            max_unique_count = 20     # Small threshold
         elif len(col_series) < 10000:
-            max_unique_ratio = 0.2  # Stricter for medium datasets
+            max_unique_ratio = 0.15   # Moderate for medium datasets
+            max_unique_count = 50     # Medium threshold
+        elif len(col_series) < 100000:
+            max_unique_ratio = 0.05   # Strict for large datasets
+            max_unique_count = 100    # Large threshold
+        elif len(col_series) < 1000000:
+            max_unique_ratio = 0.02   # Very strict for very large datasets
+            max_unique_count = 200    # Very large threshold
         else:
-            max_unique_ratio = 0.1  # Most strict for large datasets
+            max_unique_ratio = 0.01   # Extremely strict for massive datasets
+            max_unique_count = 500    # Maximum threshold for massive datasets
 
-        unique_ratio = col_series.nunique(dropna=True) / len(col_series)
-        if unique_ratio <= max_unique_ratio:
+        # Determine if categorical based on either criterion
+        is_categorical = (unique_ratio <= max_unique_ratio) or (unique_count <= max_unique_count)
+        
+        if is_categorical:
             df[col] = col_series.astype('category')
             inferred_types[col] = 'category'
             continue
