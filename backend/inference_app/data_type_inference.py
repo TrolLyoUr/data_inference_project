@@ -9,6 +9,7 @@ import codecs
 from enum import Enum
 from pyspark.sql import SparkSession
 import pyspark.pandas as ps
+import io
 
 def detect_encoding(file_path: str, sample_size: int = 10000) -> str:
     """
@@ -478,41 +479,71 @@ def determine_processing_method(file_path: str,
     return requested_method if requested_method != ProcessingMethod.SPARK else ProcessingMethod.SINGLE_THREAD
 
 def process_file(
-    file_path: str, 
+    file_path: str = None, 
     type_overrides: Optional[Dict] = None, 
     has_headers: bool = True,
     processing_method: Union[ProcessingMethod, str] = ProcessingMethod.SINGLE_THREAD,
     spark_session: Optional[SparkSession] = None,
     chunk_size: int = 100000,
-    size_threshold: int = 100 * 1024 * 1024  # 100 MB
+    size_threshold: int = 100 * 1024 * 1024,  # 100 MB
+    existing_df: Optional[pd.DataFrame] = None
 ) -> Tuple[pd.DataFrame, Dict, Dict]:
-    """Process file with smart method selection and error handling"""
+    """Process file or existing DataFrame with smart method selection and error handling"""
     try:
         # Convert string to enum if necessary
         if isinstance(processing_method, str):
             processing_method = ProcessingMethod(processing_method.lower())
 
-        # Determine the most appropriate processing method
-        # processing_method = determine_processing_method(file_path, processing_method, size_threshold)
-
-        # Process according to determined method
+        # If existing DataFrame is provided, use it directly
+        if existing_df is not None:
+            df = existing_df.copy()
+            print(df)
+            
+            if processing_method == ProcessingMethod.SPARK:
+                # Convert to Spark DataFrame if needed
+                try:
+                    if spark_session is None:
+                        spark_session = create_spark_session()
+                    if spark_session is not None:
+                        psdf = ps.DataFrame(df)
+                        pdf = psdf.to_pandas()
+                        inferred_types, conversion_errors = infer_and_convert_dtypes(pdf, type_overrides)
+                        return pdf, inferred_types, conversion_errors
+                except Exception as e:
+                    print(f"Error in Spark processing: {str(e)}")
+            
+            # If not using Spark or Spark failed, process directly
+            if len(df) > chunk_size and processing_method == ProcessingMethod.NATIVE_CHUNKING:
+                # Split DataFrame into chunks
+                chunk_dfs = [df[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
+                return process_chunks(chunk_dfs, has_headers, type_overrides)
+            else:
+                inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+                return df, inferred_types, conversion_errors
+        
+        # If no existing DataFrame, process from file
+        if file_path is None:
+            raise ValueError("Either file_path or existing_df must be provided")
+            
+        # Original file processing logic
         if processing_method == ProcessingMethod.SPARK:
             return process_with_spark(file_path, spark_session, type_overrides, has_headers)
-        
         elif processing_method == ProcessingMethod.NATIVE_CHUNKING:
             chunks = load_data(file_path, has_headers=has_headers, chunksize=chunk_size)
             return process_chunks(chunks, has_headers, type_overrides)
-        
         else:  # SINGLE_THREAD
             return process_single_thread(file_path, has_headers, type_overrides)
 
     except Exception as e:
-        # If Spark fails, try falling back to native chunking
         if processing_method == ProcessingMethod.SPARK:
             print(f"Spark processing failed, falling back to native chunking: {str(e)}")
-            chunks = load_data(file_path, has_headers=has_headers, chunksize=chunk_size)
-            return process_chunks(chunks, has_headers, type_overrides)
-        raise ValueError(f"Error processing file: {str(e)}")
+            if existing_df is not None:
+                chunk_dfs = [existing_df[i:i + chunk_size] for i in range(0, len(existing_df), chunk_size)]
+                return process_chunks(chunk_dfs, has_headers, type_overrides)
+            else:
+                chunks = load_data(file_path, has_headers=has_headers, chunksize=chunk_size)
+                return process_chunks(chunks, has_headers, type_overrides)
+        raise ValueError(f"Error processing data: {str(e)}")
 
 def process_single_thread(file_path: str, 
                          has_headers: bool, 
@@ -551,6 +582,54 @@ def process_chunks(chunks, has_headers: bool, type_overrides: Optional[Dict]) ->
         conversion_errors.update(chunk_errors)
     
     return pd.concat(df_list, ignore_index=True), inferred_types, conversion_errors
+
+def process_file_object(
+    file_obj,
+    file_name: str,
+    type_overrides: Optional[Dict] = None,
+    has_headers: bool = True,
+    processing_method: Union[ProcessingMethod, str] = ProcessingMethod.SINGLE_THREAD,
+    spark_session: Optional[SparkSession] = None,
+    chunk_size: int = 100000
+) -> Tuple[pd.DataFrame, Dict, Dict]:
+    """Process file directly from file object"""
+    try:
+        file_extension = file_name.split('.')[-1].lower()
+        file_content = file_obj.read()
+        
+        if file_extension == 'csv':
+            df = pd.read_csv(io.StringIO(file_content.decode('utf-8')))
+        elif file_extension in ['xls', 'xlsx']:
+            df = pd.read_excel(io.BytesIO(file_content))
+        else:
+            raise ValueError("Unsupported file format")
+
+        if not has_headers:
+            df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+
+        # Clean the data
+        for col in df.columns:
+            df[col] = df[col].astype(str).apply(lambda x: x.strip() if isinstance(x, str) else x)
+
+        if processing_method == ProcessingMethod.SPARK:
+            try:
+                if spark_session is None:
+                    spark_session = create_spark_session()
+                if spark_session is not None:
+                    psdf = ps.DataFrame(df)
+                    df = psdf.to_pandas()
+            except Exception as e:
+                print(f"Spark processing failed: {str(e)}")
+
+        if len(df) > chunk_size and processing_method == ProcessingMethod.NATIVE_CHUNKING:
+            chunk_dfs = [df[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
+            return process_chunks(chunk_dfs, has_headers, type_overrides)
+        
+        inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+        return df, inferred_types, conversion_errors
+
+    except Exception as e:
+        raise ValueError(f"Error processing file: {str(e)}")
 
 # Example usage:
 if __name__ == '__main__':
