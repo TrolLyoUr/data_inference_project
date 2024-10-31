@@ -11,6 +11,21 @@ from enum import Enum
 from pyspark.sql import SparkSession
 import pyspark.pandas as ps
 import io
+import logging
+
+logger = logging.getLogger(__name__)
+
+class DataTypeError(Exception):
+    """Custom exception for data type inference errors."""
+    def __init__(self, message: str, details: Optional[Dict] = None):
+        super().__init__(message)
+        self.details = details or {}
+
+class ProcessingMethod(Enum):
+    """Enum defining available processing methods."""
+    NATIVE_CHUNKING = "native_chunking"
+    SPARK = "spark"
+    SINGLE_THREAD = "single_thread"
 
 def detect_encoding(file_path: str, sample_size: int = 10000) -> str:
     """
@@ -82,218 +97,196 @@ def get_valid_encoding(file_path: str) -> str:
     raise ValueError("Unable to determine valid encoding for the file")
 
 
-def infer_and_convert_dtypes(df, type_overrides=None):
+def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = None) -> Tuple[pd.DataFrame, Dict, Dict]:
     """
-    Infer and convert data types for each column in the DataFrame in-place.
+    Infer and convert data types for each column in the DataFrame.
     
-    Parameters:
-    - df (DataFrame): The DataFrame to process.
-    - type_overrides (dict, optional): A dictionary mapping column names to desired data types.
+    Args:
+        df: Input DataFrame to process
+        type_overrides: Optional dictionary mapping column names to desired data types
+    
     Returns:
-    - inferred_types (dict): A dictionary mapping column names to inferred data types.
-    - conversion_errors (dict): A dictionary mapping column names to conversion error messages.
+        Tuple containing:
+        - Converted DataFrame
+        - Dictionary mapping column names to inferred types
+        - Dictionary mapping column names to conversion errors
     """
-    if type_overrides is None:
-        type_overrides = {}
+    type_overrides = type_overrides or {}
     inferred_types = {}
     conversion_errors = {}
     df_converted = pd.DataFrame()
     
-    # Enhanced missing values detection
-    missing_values = [
+    # Constants for missing value detection
+    MISSING_VALUES = [
         "NA", "NaN", "N/A", "Not Available", "null", "", " ", "--", "-", "?",
         "missing", "undefined", "unknown", "N.A.", "none", "nil", "(empty)",
         "not specified", "n/s", "pending", "tbd", "to be determined"
     ]
-    missing_value_patterns = [
-        r'^\s*$',
-        r'^-*$',
-        r'^null$',
-        r'^n/?a$',
-        r'^not\s+available$',
-        r'^missing$',
-        r'^undefined$',
-        r'^unknown$',
-        r'^n\.a\.$',
-        r'^none$',
-        r'^nil$',
-        r'^\(empty\)$',
-        r'^not\s+specified$',
-        r'^n/s$',
-        r'^pending$',
-        r'^tbd$',
-        r'^to\s+be\s+determined$'
-    ]
-    missing_value_regex = re.compile('|'.join(missing_value_patterns), flags=re.IGNORECASE)
     
-    for col in df.columns:
-        print(col)
-        col_series = df[col]
+    MISSING_VALUE_PATTERNS = [
+        r'^\s*$', r'^-*$', r'^null$', r'^n/?a$', r'^not\s+available$',
+        r'^missing$', r'^undefined$', r'^unknown$', r'^n\.a\.$', r'^none$',
+        r'^nil$', r'^\(empty\)$', r'^not\s+specified$', r'^n/s$',
+        r'^pending$', r'^tbd$', r'^to\s+be\s+determined$'
+    ]
+    
+    BOOLEAN_VALUES = {
+        'true': True, 'false': False,
+        'yes': True, 'no': False,
+        'y': True, 'n': False,
+        't': True, 'f': False,
+        '1': True, '0': False,
+        'on': True, 'off': False,
+        'enabled': True, 'disabled': False,
+        'active': True, 'inactive': False,
+        'positive': True, 'negative': False,
+        'success': True, 'failure': False,
+        'pass': True, 'fail': False,
+    }
+
+    missing_value_regex = re.compile('|'.join(MISSING_VALUE_PATTERNS), flags=re.IGNORECASE)
+    
+    def get_categorical_thresholds(series_length: int) -> Tuple[float, int]:
+        """Determine categorical thresholds based on series length."""
+        if series_length < 10:
+            return 0.5, 3
+        elif series_length < 100:
+            return 0.5, 10
+        elif series_length < 1000:
+            return 0.3, 20
+        elif series_length < 10000:
+            return 0.1, 50
+        elif series_length < 100000:
+            return 0.05, 100
+        elif series_length < 1000000:
+            return 0.02, 200
+        else:
+            return 0.01, 500
+
+    def clean_numeric(x) -> Optional[Union[int, float]]:
+        """Clean and convert value to numeric format."""
+        if pd.isnull(x):
+            return np.nan
+            
+        x_str = str(x).strip().lower()
         
-        # Handle type overrides
-        if col in type_overrides:
+        # Handle currency symbols
+        x_str = re.sub(r'[$€£¥]', '', x_str)
+        
+        # Handle percentages
+        if x_str.endswith('%'):
             try:
-                if type_overrides[col] in ('Int64', 'float64'):
-                    df_converted[col] = pd.to_numeric(col_series, errors='coerce')
-                    df_converted[col].fillna('', inplace=True)
-                else:
-                    df_converted[col] = col_series.astype(type_overrides[col], errors='raise')
-                inferred_types[col] = type_overrides[col]
-                continue
-            except (ValueError, TypeError) as e:
-                conversion_errors[col] = {
-                    'requested_type': type_overrides[col],
-                    'error': str(e),
-                    'sample_values': col_series.dropna().head(5).tolist()
-                }
-        # Replace missing values
-        col_series.replace(missing_values, np.nan)
-        try:
-            col_series.replace(missing_value_regex, np.nan)
-        except Exception:
-            pass
-
-        # Skip empty columns
-        if col_series.dropna().empty:
-            inferred_types[col] = 'object'
-            continue
-
-        print("Try num")
-        # Attempt to clean and convert to numeric
-        def clean_numeric(x):
-            if pd.isnull(x):
-                return np.nan
-                
-            # Convert to string and clean whitespace
-            x_str = str(x).strip().lower()
-            
-            # Handle currency symbols
-            currency_symbols = r'[$€£¥]'
-            x_str = re.sub(currency_symbols, '', x_str)
-            
-            # Handle percentages
-            if x_str.endswith('%'):
-                try:
-                    return float(x_str.rstrip('%')) / 100
-                except ValueError:
-                    return np.nan
-            
-            # Handle scientific notation
-            if 'e' in x_str and not any(c.isalpha() for c in x_str.replace('e', '')):
-                try:
-                    return float(x_str)
-                except ValueError:
-                    return np.nan
-            
-            # Handle thousands/decimal separators
-            x_str = x_str.replace(',', '')
-            if x_str.count('.') > 1:
-                x_str = x_str.replace('.', '', x_str.count('.') - 1)
-            
-            try:
-                float(x_str)
-                return x_str
+                return float(x_str.rstrip('%')) / 100
             except ValueError:
                 return np.nan
-
-        sample_size = 10000 if len(col_series) > 10000 else len(col_series)
-        sample_series = col_series.sample(n=sample_size, random_state=42)
-
-        # Apply numeric cleaning and check ratio
-        numeric_series = sample_series.apply(clean_numeric)
-        numeric_ratio = numeric_series.notna().sum() / numeric_series.notna().count()
-
-        if numeric_ratio >= 0.8:
-            # Apply numeric cleaning to the full column
-            col_numeric = col_series.apply(clean_numeric)
-            # Attempt to convert to nullable integer type
+        
+        # Handle scientific notation
+        if 'e' in x_str and not any(c.isalpha() for c in x_str.replace('e', '')):
             try:
-                df_converted[col] = pd.to_numeric(col_numeric, errors='raise').astype('Int64')
+                return float(x_str)
+            except ValueError:
+                return np.nan
+        
+        # Handle thousands/decimal separators
+        x_str = x_str.replace(',', '')
+        if x_str.count('.') > 1:
+            x_str = x_str.replace('.', '', x_str.count('.') - 1)
+        
+        try:
+            float(x_str)
+            return x_str
+        except ValueError:
+            return np.nan
+
+    for col in df.columns:
+        try:
+            col_series = df[col]
+            
+            # Handle type overrides
+            if col in type_overrides:
+                try:
+                    if type_overrides[col] in ('Int64', 'float64'):
+                        df_converted[col] = pd.to_numeric(col_series, errors='coerce')
+                        df_converted[col].fillna('', inplace=True)
+                    else:
+                        df_converted[col] = col_series.astype(type_overrides[col], errors='raise')
+                    inferred_types[col] = type_overrides[col]
+                    continue
+                except (ValueError, TypeError) as e:
+                    conversion_errors[col] = {
+                        'requested_type': type_overrides[col],
+                        'error': str(e),
+                        'sample_values': col_series.dropna().head(5).tolist()
+                    }
+            
+            # Replace missing values
+            col_series = col_series.replace(MISSING_VALUES, np.nan)
+            try:
+                col_series = col_series.replace(missing_value_regex, np.nan)
             except Exception:
-                # If conversion to Int64 fails, convert to float
-                df_converted[col] = pd.to_numeric(col_numeric, errors='coerce')
-            inferred_types[col] = str(df_converted[col].dtype)
-            continue
+                pass
 
-        print("Try date")
-        # try pandas datetime inference
-        datetime_series = pd.to_datetime(sample_series, errors='coerce', format='mixed')
-        if datetime_series.notna().sum() / sample_series.notna().sum() > 0.9:
-            df_converted[col] = datetime_series
-            inferred_types[col] = 'datetime64[ns]'
-            continue
+            # Skip empty columns
+            if col_series.dropna().empty:
+                df_converted[col] = col_series
+                inferred_types[col] = 'object'
+                continue
 
-        print("Try bool")
+            # Check for boolean values
+            unique_values = set(str(x).strip().lower() for x in col_series.dropna().unique())
+            if unique_values.issubset(BOOLEAN_VALUES.keys()):
+                df_converted[col] = col_series.map(
+                    lambda x: BOOLEAN_VALUES.get(str(x).strip().lower(), np.nan)
+                )
+                inferred_types[col] = 'bool'
+                continue
 
-        # Enhanced boolean detection
-        boolean_values = {
-            'true': True, 'false': False,
-            'yes': True, 'no': False,
-            'y': True, 'n': False,
-            't': True, 'f': False,
-            '1': True, '0': False,
-            'on': True, 'off': False,
-            'enabled': True, 'disabled': False,
-            'active': True, 'inactive': False,
-            'positive': True, 'negative': False,
-            'success': True, 'failure': False,
-            'pass': True, 'fail': False,
-        }
-        
-        unique_values = set(str(x).strip().lower() for x in col_series.dropna().unique())
-        if unique_values.issubset(boolean_values.keys()):
-            df_converted[col] = col_series.map(lambda x: boolean_values.get(str(x).strip().lower(), np.nan))
-            inferred_types[col] = 'bool'
-            continue
+            # Check for categorical
+            unique_count = col_series.nunique(dropna=True)
+            unique_ratio = unique_count / len(col_series)
+            max_ratio, max_count = get_categorical_thresholds(len(col_series))
+            
+            if (unique_ratio <= max_ratio) or (unique_count <= max_count):
+                df_converted[col] = col_series.astype('category')
+                inferred_types[col] = 'category'
+                continue
 
+            # Try numeric conversion
+            sample_size = min(10000, len(col_series))
+            sample_series = col_series.sample(n=sample_size, random_state=42)
+            numeric_series = sample_series.apply(clean_numeric)
+            numeric_ratio = numeric_series.notna().sum() / numeric_series.notna().count()
 
-        print("Try cate")
-        
-        # Check for categorical based on both unique ratio and absolute count
-        unique_count = col_series.nunique(dropna=True)
-        unique_ratio = unique_count / len(col_series)
-        
-        # Define thresholds based on dataset size with more granular ranges
-        if len(col_series) < 10:
-            max_unique_ratio = 0.5    # Very lenient for tiny datasets
-            max_unique_count = 3     # Few distinct values for tiny datasets
-        elif len(col_series) < 100:
-            max_unique_ratio = 0.5    # Very lenient for tiny datasets
-            max_unique_count = 10     # Few distinct values for tiny datasets
-        elif len(col_series) < 1000:
-            max_unique_ratio = 0.4    # Lenient for small datasets
-            max_unique_count = 20     # Small threshold
-        elif len(col_series) < 10000:
-            max_unique_ratio = 0.15   # Moderate for medium datasets
-            max_unique_count = 50     # Medium threshold
-        elif len(col_series) < 100000:
-            max_unique_ratio = 0.05   # Strict for large datasets
-            max_unique_count = 100    # Large threshold
-        elif len(col_series) < 1000000:
-            max_unique_ratio = 0.02   # Very strict for very large datasets
-            max_unique_count = 200    # Very large threshold
-        else:
-            max_unique_ratio = 0.01   # Extremely strict for massive datasets
-            max_unique_count = 500    # Maximum threshold for massive datasets
+            if numeric_ratio >= 0.8:
+                col_numeric = col_series.apply(clean_numeric)
+                try:
+                    df_converted[col] = pd.to_numeric(col_numeric, errors='raise').astype('Int64')
+                except Exception:
+                    df_converted[col] = pd.to_numeric(col_numeric, errors='coerce')
+                inferred_types[col] = str(df_converted[col].dtype)
+                continue
 
-        # Determine if categorical based on either criterion
-        is_categorical = (unique_ratio <= max_unique_ratio) or (unique_count <= max_unique_count)
-        
-        if is_categorical:
-            df_converted[col] = col_series.astype('category')
-            inferred_types[col] = 'category'
-            continue
+            # Try datetime
+            datetime_series = pd.to_datetime(sample_series, errors='coerce', format='mixed')
+            if datetime_series.notna().sum() / sample_series.notna().sum() > 0.9:
+                df_converted[col] = pd.to_datetime(col_series, errors='coerce', format='mixed')
+                inferred_types[col] = 'datetime64[ns]'
+                continue
 
-        # Default to object type
-        df_converted[col] = col_series.astype('object')
-        inferred_types[col] = 'object'
+            # Default to object
+            df_converted[col] = col_series.astype('object')
+            inferred_types[col] = 'object'
+
+        except Exception as e:
+            logger.error(f"Error processing column {col}: {str(e)}", exc_info=True)
+            conversion_errors[col] = {
+                'error': str(e),
+                'sample_values': col_series.head(5).tolist() if 'col_series' in locals() else []
+            }
+            df_converted[col] = df[col]
+            inferred_types[col] = 'object'
 
     return df_converted, inferred_types, conversion_errors
-
-class ProcessingMethod(Enum):
-    NATIVE_CHUNKING = "native_chunking"
-    SPARK = "spark"
-    SINGLE_THREAD = "single_thread"
 
 def create_spark_session(app_name: str = "DataTypeInference") -> Optional[SparkSession]:
     """Create or get existing Spark session with error handling"""
@@ -309,9 +302,6 @@ def create_spark_session(app_name: str = "DataTypeInference") -> Optional[SparkS
             .config("spark.executor.memory", "4g") \
             .config("spark.driver.maxResultSize", "2g") \
             .getOrCreate()
-        
-        # Set log level to DEBUG for more detailed output
-        # spark.sparkContext.setLogLevel("DEBUG")
         
         return spark
     except Exception as e:
@@ -384,79 +374,99 @@ def determine_processing_method(file_path: str,
     return requested_method if requested_method != ProcessingMethod.SPARK else ProcessingMethod.SINGLE_THREAD
 
 def process_file(
-    file_path: str, 
-    type_overrides: Optional[Dict] = None, 
+    file_path: str,
+    type_overrides: Optional[Dict] = None,
     has_headers: bool = True,
     processing_method: Union[ProcessingMethod, str] = ProcessingMethod.SINGLE_THREAD,
-    spark_session: Optional[SparkSession] = None,
     chunk_size: int = 100000,
-    size_threshold: int = 100 * 1024 * 1024  # 100 MB
 ) -> Tuple[pd.DataFrame, Dict, Dict]:
-    """Process file with smart method selection and error handling"""
-    # Convert string to enum if necessary
-    if isinstance(processing_method, str):
-        processing_method = ProcessingMethod(processing_method.lower())
-
-    # Determine the most appropriate processing method
-    # processing_method = determine_processing_method(file_path, processing_method, size_threshold)
-
-    # Process according to determined method
-    if processing_method == ProcessingMethod.SPARK:
-        return process_with_spark(file_path, spark_session, type_overrides, has_headers)
+    """
+    Process a file and infer data types with error handling.
     
-    elif processing_method == ProcessingMethod.NATIVE_CHUNKING:
-        file_ext = os.path.splitext(file_path)[1].lower()
-        inferred_types = {}
-        conversion_errors = {}
+    Args:
+        file_path: Path to the input file
+        type_overrides: Dictionary of column name to desired data type
+        has_headers: Whether the file has header row
+        processing_method: Method to use for processing
+        chunk_size: Size of chunks for processing large files
         
-        if file_ext == '.csv':
-            # First try to detect and validate encoding
-            encoding = get_valid_encoding(file_path)
-            
-            # Common CSV reading parameters
-            csv_params = {
-                'encoding': encoding,
-                'low_memory': False,
-                'chunksize': chunk_size,
-                'on_bad_lines': 'warn',  # Log warning for bad lines instead of failing
-                'encoding_errors': 'ignore',  # Replace invalid characters
-                'iterator': True,
-                'header': 0 if has_headers else None
-            }
-            df_list = []
-            
-            for chunk in pd.read_csv(file_path, **csv_params):
-                print(chunk)
-                # Infer types and collect errors for this chunk
-                chunk_converted, chunk_types, chunk_errors = infer_and_convert_dtypes(chunk, type_overrides)
-                df_list.append(chunk_converted)
-                print(df_list)
-                # Merge dictionaries
-                for key, value in chunk_types.items():
-                    if key not in inferred_types:
-                        inferred_types[key] = value
-                    else:
-                        # Ensure consistent data types across chunks
-                        if inferred_types[key] != value:
-                            inferred_types[key] = 'object'  # Fallback to object if inconsistent
-                conversion_errors.update(chunk_errors)
+    Returns:
+        Tuple containing:
+        - Processed DataFrame
+        - Dictionary of inferred types
+        - Dictionary of conversion errors
+        
+    Raises:
+        DataTypeError: If there are issues with type inference
+        ValueError: If file format is unsupported
+        IOError: If there are file reading issues
+    """
+    try:
+        # Convert string to enum if necessary
+        if isinstance(processing_method, str):
+            processing_method = ProcessingMethod(processing_method.lower())
 
-            print("finish")
-            # Concatenate all parquet files into final dataframe
-            full_df = pd.concat(df_list, ignore_index=True)
+        # Determine the most appropriate processing method
+        # processing_method = determine_processing_method(file_path, processing_method, size_threshold)
+
+        # Process according to determined method
+        if processing_method == ProcessingMethod.SPARK:
+            return process_with_spark(file_path, type_overrides, has_headers)
+        
+        elif processing_method == ProcessingMethod.NATIVE_CHUNKING:
+            file_ext = os.path.splitext(file_path)[1].lower()
+            inferred_types = {}
+            conversion_errors = {}
             
-            return full_df, inferred_types, conversion_errors
-    
-        elif file_ext in ['.xls', '.xlsx']:
-            try:
-                # Excel files don't need encoding detection
-                if has_headers:
-                    return pd.read_excel(file_path)
-                else:
-                    df = pd.read_excel(file_path, header=None)
-                    inferred_types, conversion_errors = infer_and_convert_dtypes(chunk, type_overrides)
-                    return df, inferred_types, conversion_errors
-            except Exception as e:
-                raise ValueError(f"Failed to read Excel file: {str(e)}")
-        else:
-            raise ValueError("Unsupported file format. Please provide a CSV or Excel file.")
+            if file_ext == '.csv':
+                # First try to detect and validate encoding
+                encoding = get_valid_encoding(file_path)
+                
+                # Common CSV reading parameters
+                csv_params = {
+                    'encoding': encoding,
+                    'low_memory': False,
+                    'chunksize': chunk_size,
+                    'on_bad_lines': 'warn',  # Log warning for bad lines instead of failing
+                    'encoding_errors': 'ignore',  # Replace invalid characters
+                    'iterator': True,
+                    'header': 0 if has_headers else None
+                }
+                df_list = []
+                
+                for chunk in pd.read_csv(file_path, **csv_params):
+                    # Infer types and collect errors for this chunk
+                    chunk_converted, chunk_types, chunk_errors = infer_and_convert_dtypes(chunk, type_overrides)
+                    df_list.append(chunk_converted)
+                    # Merge dictionaries
+                    for key, value in chunk_types.items():
+                        if key not in inferred_types:
+                            inferred_types[key] = value
+                        else:
+                            # Ensure consistent data types across chunks
+                            if inferred_types[key] != value:
+                                inferred_types[key] = 'object'  # Fallback to object if inconsistent
+                    conversion_errors.update(chunk_errors)
+
+                # Concatenate all parquet files into final dataframe
+                full_df = pd.concat(df_list, ignore_index=True)
+                
+                return full_df, inferred_types, conversion_errors
+        
+            elif file_ext in ['.xls', '.xlsx']:
+                try:
+                    # Excel files don't need encoding detection
+                    if has_headers:
+                        return pd.read_excel(file_path)
+                    else:
+                        df = pd.read_excel(file_path, header=None)
+                        inferred_types, conversion_errors = infer_and_convert_dtypes(chunk, type_overrides)
+                        return df, inferred_types, conversion_errors
+                except Exception as e:
+                    raise ValueError(f"Failed to read Excel file: {str(e)}")
+            else:
+                raise ValueError("Unsupported file format. Please provide a CSV or Excel file.")
+
+    except Exception as e:
+        logger.error(f"Error processing file: {str(e)}", exc_info=True)
+        raise DataTypeError("Failed to process file", {"error": str(e)})
