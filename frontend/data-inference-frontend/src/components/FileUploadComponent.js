@@ -60,16 +60,14 @@ function FileUploadComponent() {
 
   const handlePageChange = (newPage) => {
     setCurrentPage(newPage);
-    if (!file) return;
+    if (!dataPreview) return;
 
     const formData = new FormData();
-    formData.append("file", file);
-    formData.append("has_headers", hasHeaders);
     formData.append("page", newPage);
     formData.append("page_size", pageSize);
 
     axios
-      .post("/api/upload/", formData)
+      .post("/api/paginate/", formData)
       .then((response) => {
         setDataPreview(response.data.data_preview);
       })
