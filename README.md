@@ -13,7 +13,7 @@ A robust data processing application that automatically infers and converts data
 - Multiple processing methods:
   - Single-thread processing for small files
   - Native chunking for medium-sized files
-  - PySpark integration for large-scale data
+  - PySpark integration for large-scale data (TODO)
 - Comprehensive encoding detection and handling
 - Support for CSV and Excel files
 - REST API endpoints for file upload and data pagination
