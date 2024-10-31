@@ -2,16 +2,19 @@ from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 import json
-from .data_type_inference import process_file_object, ProcessingMethod
+from .serializers import UploadedFileSerializer
+from .data_type_inference import process_file, ProcessingMethod
 
 class FileUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser]
     current_df = None  # Make it a class variable to share across instances
     
     def post(self, request, format=None):
-        if 'file' not in request.FILES:
-            return Response({'error': 'No file provided'}, status=400)
-
+        file_serializer = UploadedFileSerializer(data=request.data)
+        if file_serializer.is_valid():
+            file_instance = file_serializer.save()
+            file_path = file_instance.file.path
+        
         type_overrides = {}
         if 'type_overrides' in request.data:
             type_overrides = json.loads(request.data['type_overrides'])
@@ -21,15 +24,20 @@ class FileUploadView(APIView):
         page_size = int(request.data.get('page_size', 10))
 
         try:
-            # Process new file
-            file_obj = request.FILES['file']
-            df, inferred_types, conversion_errors = process_file_object(
-                file_obj,
-                file_obj.name,
+            # Process file and store DataFrame
+            import time
+            start_time = time.time()
+            
+            df, inferred_types, conversion_errors = process_file(
+                file_path, 
                 type_overrides=type_overrides,
                 has_headers=has_headers,
-                processing_method=ProcessingMethod.SPARK
+                processing_method=ProcessingMethod.NATIVE_CHUNKING
             )
+            
+            process_time = time.time() - start_time
+            print(f"Process file execution time: {process_time:.2f} seconds")
+
             FileUploadView.current_df = df
 
             # Calculate pagination
@@ -38,6 +46,7 @@ class FileUploadView(APIView):
             end_idx = start_idx + page_size
             
             data_preview = df.iloc[start_idx:end_idx].to_dict('records')
+
             
             response_data = {
                 'inferred_types': inferred_types,
