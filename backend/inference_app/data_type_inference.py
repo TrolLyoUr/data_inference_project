@@ -148,17 +148,17 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
     
     def get_categorical_thresholds(series_length: int) -> Tuple[float, int]:
         """Determine categorical thresholds based on series length."""
-        if series_length < 10:
+        if series_length <= 10:
             return 0.5, 3
-        elif series_length < 100:
+        elif series_length <= 100:
             return 0.5, 10
-        elif series_length < 1000:
+        elif series_length <= 1000:
             return 0.3, 20
-        elif series_length < 10000:
+        elif series_length <= 10000:
             return 0.1, 50
-        elif series_length < 100000:
+        elif series_length <= 100000:
             return 0.05, 100
-        elif series_length < 1000000:
+        elif series_length <= 1000000:
             return 0.02, 200
         else:
             return 0.01, 500
@@ -258,17 +258,7 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
                 )
                 inferred_types[col] = 'bool'
                 continue
-
-            # Check for categorical
-            unique_count = col_series.nunique(dropna=True)
-            unique_ratio = unique_count / len(col_series)
-            max_ratio, max_count = get_categorical_thresholds(len(col_series))
             
-            if (unique_ratio <= max_ratio) or (unique_count <= max_count):
-                df_converted[col] = col_series.astype('category')
-                inferred_types[col] = 'category'
-                continue
-
             # Try numeric conversion
             sample_size = min(10000, len(col_series))
             sample_series = col_series.sample(n=sample_size, random_state=42)
@@ -287,6 +277,16 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
                 except Exception:
                     df_converted[col] = pd.to_numeric(col_numeric, errors='coerce')
                 inferred_types[col] = str(df_converted[col].dtype)
+                continue
+
+            # Check for categorical
+            unique_count = col_series.nunique(dropna=True)
+            unique_ratio = unique_count / len(col_series)
+            max_ratio, max_count = get_categorical_thresholds(len(col_series))
+            
+            if (unique_ratio <= max_ratio) or (unique_count <= max_count):
+                df_converted[col] = col_series.astype('category')
+                inferred_types[col] = 'category'
                 continue
 
             # Try datetime
