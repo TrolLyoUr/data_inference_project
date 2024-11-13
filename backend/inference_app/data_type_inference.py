@@ -451,17 +451,36 @@ def process_file(
                 # Concatenate all parquet files into final dataframe
                 full_df = pd.concat(df_list, ignore_index=True)
                 
+                # Convert boolean columns to string representation
+                for col in full_df.columns:
+                    if pd.api.types.is_bool_dtype(full_df[col]):
+                        full_df[col] = full_df[col].map({True: 'True', False: 'False', pd.NA: 'N/A'})
+                    elif pd.api.types.is_categorical_dtype(full_df[col]):
+                        full_df[col] = full_df[col].cat.add_categories(['N/A'])
+                
+                full_df.fillna('N/A', inplace=True)
+                
                 return full_df, inferred_types, conversion_errors
         
             elif file_ext in ['.xls', '.xlsx']:
                 try:
                     # Excel files don't need encoding detection
                     if has_headers:
-                        return pd.read_excel(file_path)
+                        df = pd.read_excel(file_path)
                     else:
                         df = pd.read_excel(file_path, header=None)
-                        inferred_types, conversion_errors = infer_and_convert_dtypes(chunk, type_overrides)
-                        return df, inferred_types, conversion_errors
+                    df_converted, inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+                    
+                    # Convert boolean columns to string representation
+                    for col in df_converted.columns:
+                        if pd.api.types.is_bool_dtype(df_converted[col]):
+                            df_converted[col] = df_converted[col].map({True: 'True', False: 'False', pd.NA: 'N/A'})
+                        elif pd.api.types.is_categorical_dtype(df_converted[col]):
+                            df_converted[col] = df_converted[col].cat.add_categories(['N/A'])
+                    
+                    df_converted.fillna('N/A', inplace=True)
+                    
+                    return df_converted, inferred_types, conversion_errors
                 except Exception as e:
                     raise ValueError(f"Failed to read Excel file: {str(e)}")
             else:
