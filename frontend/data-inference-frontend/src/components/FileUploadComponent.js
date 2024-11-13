@@ -114,7 +114,6 @@ function FileUploadComponent() {
     bool: "Boolean",
     category: "Categorical",
     object: "Text",
-    string: "Text",
   };
 
   const getDisplayType = (dtype) => {
