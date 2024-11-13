@@ -12,7 +12,7 @@ A robust data processing application that automatically infers and converts data
   - Text/object data
 - Multiple processing methods:
   - Single-thread processing for small files
-  - Native chunking for medium-sized files
+  - Native chunking for large CSV files (CSV only)
   - PySpark integration for large-scale data (TODO)
 - Comprehensive encoding detection and handling
 - Support for CSV and Excel files
@@ -106,10 +106,19 @@ The application includes comprehensive error handling:
 
 ## Performance Considerations
 
-- Uses chunked processing for large CSV files
+- Uses chunked processing for large CSV files (Note: Excel files are processed in single thread only)
 - Implements Spark processing for very large datasets (TODO)
 - Supports pagination for efficient data preview
 - Includes memory optimization techniques
+
+### Processing Method Details
+
+| File Type | Available Processing Methods                           |
+| --------- | ------------------------------------------------------ |
+| CSV       | - Single thread<br>- Native chunking<br>- Spark (TODO) |
+| Excel     | - Single thread only                                   |
+
+**Note**: For large Excel files, it's recommended to convert them to CSV format first to take advantage of the chunked processing capabilities.
 
 ## License
 
