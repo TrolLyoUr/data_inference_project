@@ -111,9 +111,11 @@ function FileUploadComponent() {
     Int64: "Numeric (Int64)",
     complex128: "Complex Number",
     "datetime64[ns]": "Date",
+    "timedelta64[ns]": "Duration",
     bool: "Boolean",
     category: "Categorical",
     object: "Text",
+    string: "Text",
   };
 
   const getDisplayType = (dtype) => {

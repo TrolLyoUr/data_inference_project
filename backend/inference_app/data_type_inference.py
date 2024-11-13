@@ -96,6 +96,40 @@ def get_valid_encoding(file_path: str) -> str:
             
     raise ValueError("Unable to determine valid encoding for the file")
 
+def clean_timedelta(x) -> Optional[pd.Timedelta]:
+    """Clean and convert value to timedelta format."""
+    word_to_number = {
+        'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+        'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+        'ten': 10
+    }
+
+    if pd.isnull(x):
+        return pd.NaT
+        
+    x_str = str(x).strip().lower()
+    
+    # Handle ISO format (P#D)
+    if x_str.startswith('p') and x_str.endswith('d'):
+        try:
+            days = float(x_str[1:-1])
+            return pd.Timedelta(days=days)
+        except ValueError:
+            return pd.NaT
+    
+    # Remove 'days' suffix and variations
+    x_str = re.sub(r'\s*(days?|d)\s*$', '', x_str)
+    
+    try:
+        # Try direct conversion for numeric values
+        if x_str.replace('.', '').replace('-', '').isdigit():
+            return pd.Timedelta(days=float(x_str))
+        # Try parsing word numbers (like 'eight')
+        elif x_str in word_to_number:
+            return pd.Timedelta(days=word_to_number[x_str])
+        return pd.NaT
+    except (ValueError, TypeError):
+        return pd.NaT
 
 def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = None) -> Tuple[pd.DataFrame, Dict, Dict]:
     """
@@ -226,6 +260,9 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
                             (isinstance(x, str) and ('i' in x or 'j' in x)) else x
                         )
                         df_converted[col] = df_converted[col].astype('complex128')
+                    elif type_overrides[col] == 'timedelta64[ns]':
+                        df_converted[col] = col_series.apply(clean_timedelta)
+                        df_converted[col] = df_converted[col].astype('timedelta64[ns]')
                     else:
                         df_converted[col] = col_series.astype(type_overrides[col], errors='raise')
                     inferred_types[col] = type_overrides[col]
@@ -239,6 +276,7 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
             
             # Replace missing values
             col_series = col_series.replace(MISSING_VALUES, np.nan)
+            print(col_series)
             try:
                 col_series = col_series.replace(missing_value_regex, np.nan)
             except Exception:
@@ -287,6 +325,15 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
             if (unique_ratio <= max_ratio) or (unique_count <= max_count):
                 df_converted[col] = col_series.astype('category')
                 inferred_types[col] = 'category'
+                continue
+
+            # Try timedelta conversion before datetime
+            sample_size = min(10000, len(col_series))
+            sample_series = col_series.sample(n=sample_size, random_state=42)
+            timedelta_series = sample_series.apply(clean_timedelta)
+            if timedelta_series.notna().sum() / sample_series.notna().sum() > 0.9:
+                df_converted[col] = col_series.apply(clean_timedelta)
+                inferred_types[col] = 'timedelta64[ns]'
                 continue
 
             # Try datetime
