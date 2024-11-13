@@ -4,6 +4,7 @@ from rest_framework.response import Response
 import json
 from .serializers import UploadedFileSerializer
 from .data_type_inference import process_file, ProcessingMethod
+import pandas as pd
 
 class FileUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser]
@@ -45,8 +46,14 @@ class FileUploadView(APIView):
             start_idx = (page - 1) * page_size
             end_idx = start_idx + page_size
             
-            data_preview = df.iloc[start_idx:end_idx].to_dict('records')
-
+            # Convert DataFrame slice to JSON
+            data_preview = json.loads(
+                df.iloc[start_idx:end_idx].to_json(
+                    orient='records',
+                    date_format='iso',
+                    default_handler=str  # Handle any non-serializable objects
+                )
+            )
             
             response_data = {
                 'inferred_types': inferred_types,
@@ -54,6 +61,7 @@ class FileUploadView(APIView):
                 'data_preview': data_preview,
                 'total_rows': total_rows,
             }
+            print(inferred_types)
             
             if conversion_errors:
                 return Response(response_data, status=400)
@@ -77,7 +85,14 @@ class DataPaginationView(APIView):
             start_idx = (page - 1) * page_size
             end_idx = start_idx + page_size
             
-            data_preview = df.iloc[start_idx:end_idx].to_dict('records')
+            # Convert DataFrame slice to JSON
+            data_preview = json.loads(
+                df.iloc[start_idx:end_idx].to_json(
+                    orient='records',
+                    date_format='iso',
+                    default_handler=str  # Handle any non-serializable objects
+                )
+            )
             
             return Response({
                 'data_preview': data_preview,

@@ -109,6 +109,7 @@ function FileUploadComponent() {
   const typeOptions = {
     float64: "Numeric (float64)",
     Int64: "Numeric (Int64)",
+    complex128: "Complex Number",
     "datetime64[ns]": "Date",
     bool: "Boolean",
     category: "Categorical",
@@ -200,7 +201,7 @@ function FileUploadComponent() {
                         >
                           {Object.entries(typeOptions).map(([value, label]) => (
                             <option key={value} value={value}>
-                              {value}
+                              {label}
                             </option>
                           ))}
                         </select>

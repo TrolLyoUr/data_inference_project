@@ -163,12 +163,23 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
         else:
             return 0.01, 500
 
-    def clean_numeric(x) -> Optional[Union[int, float]]:
+    def clean_numeric(x) -> Optional[Union[int, float, complex]]:
         """Clean and convert value to numeric format."""
         if pd.isnull(x):
             return np.nan
             
         x_str = str(x).strip().lower()
+        
+        # Handle complex numbers
+        if 'i' in x_str or 'j' in x_str:
+            try:
+                # Replace 'i' with 'j' for numpy complex notation
+                complex_str = x_str.replace('i', 'j')
+                # Remove spaces between numbers and j
+                complex_str = re.sub(r'(\d)\s*j', r'\1j', complex_str)
+                return complex(complex_str)
+            except ValueError:
+                return np.nan
         
         # Handle currency symbols
         x_str = re.sub(r'[$€£¥]', '', x_str)
@@ -208,6 +219,13 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
                     if type_overrides[col] in ('Int64', 'float64'):
                         df_converted[col] = pd.to_numeric(col_series, errors='coerce')
                         df_converted[col].fillna('', inplace=True)
+                    elif type_overrides[col] == 'complex128':
+                        # Convert to complex numbers
+                        df_converted[col] = col_series.apply(lambda x: 
+                            complex(str(x).replace('i', 'j')) if pd.notna(x) and 
+                            (isinstance(x, str) and ('i' in x or 'j' in x)) else x
+                        )
+                        df_converted[col] = df_converted[col].astype('complex128')
                     else:
                         df_converted[col] = col_series.astype(type_overrides[col], errors='raise')
                     inferred_types[col] = type_overrides[col]
@@ -260,7 +278,12 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
             if numeric_ratio >= 0.8:
                 col_numeric = col_series.apply(clean_numeric)
                 try:
-                    df_converted[col] = pd.to_numeric(col_numeric, errors='raise').astype('Int64')
+                    # Check if the series contains complex numbers
+                    if any(isinstance(x, complex) for x in col_numeric.dropna()):
+                        df_converted[col] = col_numeric.astype(complex)
+                    else:
+                        # Try integer conversion first, then float
+                        df_converted[col] = pd.to_numeric(col_numeric, errors='raise').astype('Int64')
                 except Exception:
                     df_converted[col] = pd.to_numeric(col_numeric, errors='coerce')
                 inferred_types[col] = str(df_converted[col].dtype)
@@ -454,11 +477,7 @@ def process_file(
                 # Convert boolean columns to string representation
                 for col in full_df.columns:
                     if pd.api.types.is_bool_dtype(full_df[col]):
-                        full_df[col] = full_df[col].map({True: 'True', False: 'False', pd.NA: 'N/A'})
-                    elif pd.api.types.is_categorical_dtype(full_df[col]):
-                        full_df[col] = full_df[col].cat.add_categories(['N/A'])
-                
-                full_df.fillna('N/A', inplace=True)
+                        full_df[col] = full_df[col].map({True: 'True', False: 'False'})
                 
                 return full_df, inferred_types, conversion_errors
         
@@ -474,11 +493,7 @@ def process_file(
                     # Convert boolean columns to string representation
                     for col in df_converted.columns:
                         if pd.api.types.is_bool_dtype(df_converted[col]):
-                            df_converted[col] = df_converted[col].map({True: 'True', False: 'False', pd.NA: 'N/A'})
-                        elif pd.api.types.is_categorical_dtype(df_converted[col]):
-                            df_converted[col] = df_converted[col].cat.add_categories(['N/A'])
-                    
-                    df_converted.fillna('N/A', inplace=True)
+                            df_converted[col] = df_converted[col].map({True: 'True', False: 'False'})
                     
                     return df_converted, inferred_types, conversion_errors
                 except Exception as e:
