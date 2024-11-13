@@ -163,3 +163,5 @@ cython_debug/
 
 # Sample data
 *.csv
+*.xls
+*.xlsx
