@@ -201,7 +201,7 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
         """Clean and convert value to numeric format."""
         if pd.isnull(x):
             return np.nan
-            
+        
         x_str = str(x).strip().lower()
         
         # Handle complex numbers
@@ -215,8 +215,30 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
             except ValueError:
                 return np.nan
         
-        # Handle currency symbols
-        x_str = re.sub(r'[$€£¥]', '', x_str)
+        # Handle currency data
+        # Define common currency patterns
+        currency_pattern = r'''
+            ^                           # Start of string
+            ([+-]?\s*)?                # Optional sign
+            (?:[$€£¥]|EUR|USD|GBP|JPY|AUD|CNY) # Currency symbols or codes
+            \s*                        # Optional whitespace
+            (\d[,.\d]*)               # Number part
+            |                         # OR
+            (\d[,.\d]*)              # Number part
+            \s*                       # Optional whitespace
+            (?:[$€£¥]|EUR|USD|GBP|JPY|AUD|CNY) # Currency symbols or codes
+            $                          # End of string
+        '''
+        
+        currency_match = re.search(currency_pattern, x_str, re.VERBOSE)
+        if currency_match:
+            # Extract the numeric part
+            if currency_match.group(2):  # Symbol prefix format
+                x_str = currency_match.group(2)
+                sign = '-' if currency_match.group(1) and '-' in currency_match.group(1) else ''
+                x_str = sign + x_str
+            else:  # Symbol suffix format
+                x_str = currency_match.group(3)
         
         # Handle percentages
         if x_str.endswith('%'):
@@ -238,8 +260,7 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
             x_str = x_str.replace('.', '', x_str.count('.') - 1)
         
         try:
-            float(x_str)
-            return x_str
+            return float(x_str)
         except ValueError:
             return np.nan
 
@@ -276,7 +297,6 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
             
             # Replace missing values
             col_series = col_series.replace(MISSING_VALUES, np.nan)
-            print(col_series)
             try:
                 col_series = col_series.replace(missing_value_regex, np.nan)
             except Exception:

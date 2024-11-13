@@ -61,7 +61,6 @@ class FileUploadView(APIView):
                 'data_preview': data_preview,
                 'total_rows': total_rows,
             }
-            print(inferred_types)
             
             if conversion_errors:
                 return Response(response_data, status=400)
