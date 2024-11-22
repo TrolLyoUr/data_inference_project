@@ -496,13 +496,45 @@ def process_file(
         if isinstance(processing_method, str):
             processing_method = ProcessingMethod(processing_method.lower())
 
-        # Determine the most appropriate processing method
-        # processing_method = determine_processing_method(file_path, processing_method, size_threshold)
-
         # Process according to determined method
         if processing_method == ProcessingMethod.SPARK:
             return process_with_spark(file_path, type_overrides, has_headers)
         
+        elif processing_method == ProcessingMethod.SINGLE_THREAD:
+            file_ext = os.path.splitext(file_path)[1].lower()
+            
+            if file_ext == '.csv':
+                # Detect and validate encoding
+                encoding = get_valid_encoding(file_path)
+                
+                # Read entire CSV file at once
+                df = pd.read_csv(
+                    file_path,
+                    encoding=encoding,
+                    low_memory=False,
+                    on_bad_lines='warn',
+                    encoding_errors='ignore',
+                    header=0 if has_headers else None
+                )
+                
+            elif file_ext in ['.xls', '.xlsx']:
+                # Read entire Excel file at once
+                df = pd.read_excel(
+                    file_path,
+                    header=0 if has_headers else None
+                )
+                
+            else:
+                raise ValueError("Unsupported file format. Please provide a CSV or Excel file.")
+
+            # Set column names if no headers
+            if not has_headers:
+                df.columns = [f'Column_{i+1}' for i in range(len(df.columns))]
+
+            # Process types for entire dataframe at once
+            df_converted, inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+            return df_converted, inferred_types, conversion_errors
+            
         elif processing_method == ProcessingMethod.NATIVE_CHUNKING:
             file_ext = os.path.splitext(file_path)[1].lower()
             inferred_types = {}
@@ -550,19 +582,54 @@ def process_file(
         
             elif file_ext in ['.xls', '.xlsx']:
                 try:
-                    # Excel files don't need encoding detection
-                    if has_headers:
-                        df = pd.read_excel(file_path)
-                    else:
-                        df = pd.read_excel(file_path, header=None)
-                    df_converted, inferred_types, conversion_errors = infer_and_convert_dtypes(df, type_overrides)
+                    # First read the total number of rows
+                    excel_info = pd.read_excel(file_path, nrows=0)
+                    total_rows = len(pd.read_excel(file_path, nrows=None))
+                    
+                    df_list = []
+                    inferred_types = {}
+                    conversion_errors = {}
+                    
+                    # Process in chunks
+                    for start_row in range(0, total_rows, chunk_size):
+                        # Read chunk
+                        if has_headers and start_row == 0:
+                            # First chunk includes headers
+                            chunk = pd.read_excel(file_path, nrows=chunk_size)
+                        else:
+                            # Subsequent chunks skip headers
+                            chunk = pd.read_excel(
+                                file_path,
+                                skiprows=1 if has_headers else 0,  # Skip header row if it exists
+                                nrows=chunk_size,
+                                header=None,  # Don't use first row as header
+                                names=excel_info.columns  # Use original column names
+                            )
+                        
+                        # Infer types and collect errors for this chunk
+                        chunk_converted, chunk_types, chunk_errors = infer_and_convert_dtypes(chunk, type_overrides)
+                        df_list.append(chunk_converted)
+                        
+                        # Merge dictionaries
+                        for key, value in chunk_types.items():
+                            if key not in inferred_types:
+                                inferred_types[key] = value
+                            else:
+                                # Ensure consistent data types across chunks
+                                if inferred_types[key] != value:
+                                    inferred_types[key] = 'object'  # Fallback to object if inconsistent
+                        conversion_errors.update(chunk_errors)
+
+                    # Concatenate all chunks into final dataframe
+                    full_df = pd.concat(df_list, ignore_index=True)
                     
                     # Convert boolean columns to string representation
-                    for col in df_converted.columns:
-                        if pd.api.types.is_bool_dtype(df_converted[col]):
-                            df_converted[col] = df_converted[col].map({True: 'True', False: 'False'})
+                    for col in full_df.columns:
+                        if pd.api.types.is_bool_dtype(full_df[col]):
+                            full_df[col] = full_df[col].map({True: 'True', False: 'False'})
                     
-                    return df_converted, inferred_types, conversion_errors
+                    return full_df, inferred_types, conversion_errors
+                
                 except Exception as e:
                     raise ValueError(f"Failed to read Excel file: {str(e)}")
             else:
