@@ -318,10 +318,11 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
                 continue
             
             # Try numeric conversion
-            sample_size = min(10000, len(col_series))
-            sample_series = col_series.sample(n=sample_size, random_state=42)
-            numeric_series = sample_series.apply(clean_numeric)
-            numeric_ratio = numeric_series.notna().sum() / numeric_series.notna().count()
+            non_sparse_series = col_series.dropna()
+            sample_size = min(10000, len(non_sparse_series))
+            sample_series = non_sparse_series.sample(n=sample_size, random_state=42)
+            sample_cleaned = sample_series.apply(clean_numeric)
+            numeric_ratio = sample_cleaned.notna().sum() / sample_size
 
             if numeric_ratio >= 0.8:
                 col_numeric = col_series.apply(clean_numeric)
@@ -348,17 +349,16 @@ def infer_and_convert_dtypes(df: pd.DataFrame, type_overrides: Optional[Dict] = 
                 continue
 
             # Try timedelta conversion before datetime
-            sample_size = min(10000, len(col_series))
-            sample_series = col_series.sample(n=sample_size, random_state=42)
             timedelta_series = sample_series.apply(clean_timedelta)
-            if timedelta_series.notna().sum() / sample_series.notna().sum() > 0.9:
+            if timedelta_series.notna().sum() / sample_size > 0.9:
                 df_converted[col] = col_series.apply(clean_timedelta)
                 inferred_types[col] = 'timedelta64[ns]'
                 continue
 
             # Try datetime
             datetime_series = pd.to_datetime(sample_series, errors='coerce', format='mixed')
-            if datetime_series.notna().sum() / sample_series.notna().sum() > 0.9:
+            print(datetime_series.notna().sum() / sample_size)
+            if datetime_series.notna().sum() / sample_size > 0.9:
                 df_converted[col] = pd.to_datetime(col_series, errors='coerce', format='mixed')
                 inferred_types[col] = 'datetime64[ns]'
                 continue
